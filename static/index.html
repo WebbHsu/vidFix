@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vidFix</title>
+  <link rel="stylesheet" href="/static/app.css?v=14" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo">vidFix</span>
+      <span class="tagline">舊實拍 · 選擇性臉部修復</span>
+    </div>
+    <div id="health" class="health"></div>
+  </header>
+
+  <section class="setup">
+    <div class="row">
+      <button type="button" id="btnBrowse">瀏覽 MKV</button>
+      <input id="sourcePath" type="text" placeholder="或貼上本機 .mkv 的完整路徑" spellcheck="false" />
+      <button type="button" id="btnCreate" class="primary">建立任務</button>
+    </div>
+    <div class="row">
+      <label>既有任務
+        <select id="jobSelect"><option value="">（新任務）</option></select>
+      </label>
+      <button type="button" id="btnOpen" class="primary">開啟既有任務</button>
+    </div>
+    <div id="jobCards" class="job-cards"></div>
+  </section>
+
+  <section id="workspace" class="workspace hidden">
+    <div class="toolbar">
+      <div class="file-meta" id="fileMeta"></div>
+      <div class="actions">
+        <button type="button" id="btnAnalyze" class="primary">分析</button>
+        <button type="button" id="btnRestore">開始修復</button>
+        <button type="button" id="btnAssemble">輸出成品</button>
+        <button type="button" id="btnStop" class="danger">停止</button>
+        <button type="button" id="btnClear">清除修復結果並重跑已選段</button>
+        <a id="btnDownload" class="btn hidden" href="#">下載成品</a>
+      </div>
+    </div>
+
+    <div class="params">
+      <span>修復方式（可複選，同一段依序套用）</span>
+      <label class="chk"><input type="checkbox" id="mCodeformer" checked /> CodeFormer 修臉</label>
+      <label class="chk"><input type="checkbox" id="mDeblock" /> 去方塊</label>
+      <label class="chk"><input type="checkbox" id="mDeblur" /> 去壓縮模糊</label>
+      <label class="chk"><input type="checkbox" id="mDenoise" /> 降噪</label>
+      <label id="fidelityRow">CodeFormer fidelity
+        <input id="fidelity" type="range" min="0.30" max="0.55" step="0.01" value="0.40" />
+        <span id="fidelityVal">0.40</span>
+      </label>
+      <label id="visibilityRow">貼回 visibility
+        <input id="visibility" type="range" min="0.50" max="0.70" step="0.01" value="0.60" />
+        <span id="visibilityVal">0.60</span>
+      </label>
+      <label id="deblockRow" class="hidden">去塊／去糊強度
+        <select id="deblockStrength">
+          <option value="mild">輕</option>
+          <option value="medium" selected>中</option>
+          <option value="strong">重</option>
+        </select>
+      </label>
+      <label id="denoiseRow" class="hidden">降噪強度
+        <select id="denoiseStrength">
+          <option value="mild">輕</option>
+          <option value="medium" selected>中</option>
+          <option value="strong">重</option>
+        </select>
+      </label>
+      <span class="hint">同一段可勾多種，順序：去塊 → 降噪 → 去糊 → 修臉。降噪強度與去塊／去糊分開選。改參數不會自動作廢舊輸出。</span>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-bar"><div id="progressFill"></div></div>
+      <div id="progressText" class="progress-text">尚未開始</div>
+    </div>
+
+    <div class="main">
+      <aside class="restore-list">
+        <h2>目前已選修復 <span id="restoreCount">0</span></h2>
+        <p class="hint">預設全部跳過。只修你標成修復的段（通常 3–4 段）。</p>
+        <ul id="restoreItems"></ul>
+      </aside>
+      <div class="stage">
+        <div id="timeline" class="timeline" title="時間軸：灰=跳過，橙=修復"></div>
+        <div class="player-row">
+          <div class="player-wrap">
+            <video id="player" controls playsinline muted></video>
+            <div id="previewStatus" class="preview-status"></div>
+          </div>
+          <div class="player-side">
+            <div id="segInfo" class="seg-info">尚未選段</div>
+            <div class="seg-btns">
+              <button type="button" id="btnPreview">預覽此段 (Space)</button>
+              <button type="button" id="btnTagRestore" class="primary">修復 (F)</button>
+              <button type="button" id="btnTagSkip">跳過 (S)</button>
+            </div>
+            <p class="keys">點縮圖選段，F 修復、S 跳過、Space 預覽、← → 切段</p>
+          </div>
+        </div>
+        <div class="grid-panel">
+          <div class="grid-head">縮圖網格 <span id="gridCount">0 段</span>　（可捲動）</div>
+          <div id="grid" class="grid"></div>
+        </div>
+      </div>
+    </div>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <script src="/static/app.js?v=17"></script>
+</body>
+</html>

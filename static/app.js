@@ -1,0 +1,643 @@
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  jobId: null,
+  job: null,
+  segs: [],
+  selected: 0,
+  poll: null,
+  busy: false,
+  segFp: "",
+};
+
+function fmtEta(sec) {
+  if (sec == null || Number.isNaN(sec)) return "";
+  const s = Math.max(0, Math.round(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `剩餘約 ${h} 小時 ${m % 60} 分`;
+  }
+  if (m > 0) return `剩餘約 ${m} 分 ${r} 秒`;
+  return `剩餘約 ${r} 秒`;
+}
+
+async function api(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, { ...opts, headers });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    const msg = (data && (data.detail || data.message)) || res.statusText;
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return data;
+}
+
+async function refreshHealth() {
+  try {
+    const h = await api("/api/health");
+    const pills = [
+      ["ffmpeg", h.ffmpeg],
+      ["場景切分", h.scenedetect],
+      ["CUDA", h.cuda],
+      ["CodeFormer", h.codeformer],
+      ["InsightFace", h.insightface],
+    ];
+    $("health").innerHTML = pills
+      .map(([n, ok]) => `<span class="pill ${ok ? "ok" : "bad"}">${n} ${ok ? "✓" : "✕"}</span>`)
+      .join("");
+    if (h.cuda_name) {
+      $("health").insertAdjacentHTML(
+        "beforeend",
+        `<span class="pill ok">${h.cuda_name}</span>`
+      );
+    } else if (!h.torch) {
+      $("health").insertAdjacentHTML(
+        "beforeend",
+        '<span class="pill bad">請用 run.bat 啟動（目前不是 .venv）</span>'
+      );
+    }
+  } catch {
+    $("health").innerHTML = '<span class="pill bad">服務未連線</span>';
+  }
+}
+
+async function refreshJobs() {
+  const { jobs } = await api("/api/jobs");
+  const sel = $("jobSelect");
+  const cur = state.jobId || "";
+  sel.innerHTML = '<option value="">（新任務）</option>';
+  for (const j of jobs) {
+    const opt = document.createElement("option");
+    opt.value = j.job_id;
+    opt.textContent = `${j.source_name} · ${j.job_id} · ${j.phase} · ${j.total_segments || 0} 段`;
+    sel.appendChild(opt);
+  }
+  sel.value = cur;
+  renderJobCards(jobs);
+  return jobs;
+}
+
+function renderJobCards(jobs) {
+  const el = $("jobCards");
+  if (!el) return;
+  el.innerHTML = "";
+  if (!jobs.length) {
+    el.innerHTML = '<div class="hint">尚無既有任務。分析完成後會出現在這裡，點卡片即可打開縮圖。</div>';
+    return;
+  }
+  for (const j of jobs) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "job-card" + (j.job_id === state.jobId ? " on" : "");
+    const missing = j.thumbs_missing || 0;
+    const n = j.total_segments || 0;
+    const imgHtml = j.cover_thumb
+      ? `<img src="${j.cover_thumb}" alt="">`
+      : `<div class="thumb-ph">無縮圖</div>`;
+    btn.innerHTML =
+      `${imgHtml}<div class="meta"><b>${j.source_name}</b>` +
+      `<div class="tc">${n} 段 · 分析 ${j.analyze_status}` +
+      (missing ? ` · 缺縮圖 ${missing}` : "") +
+      `</div></div>`;
+    btn.onclick = () => {
+      $("jobSelect").value = j.job_id;
+      loadJob(j.job_id);
+    };
+    el.appendChild(btn);
+  }
+}
+
+async function loadJob(id) {
+  state.jobId = id;
+  state.segFp = "";
+  state.selected = 0;
+  $("workspace").classList.remove("hidden");
+  try {
+    await refreshJob();
+    if (!state.segs.length) {
+      await refreshSegments(true);
+    }
+  } catch (e) {
+    alert("開啟任務失敗：" + e.message);
+    return;
+  }
+  startPoll();
+  const panel = document.querySelector(".grid-panel");
+  if (panel) panel.scrollIntoView({ block: "nearest" });
+}
+
+async function refreshJob() {
+  if (!state.jobId) return;
+  const job = await api(`/api/jobs/${state.jobId}`);
+  state.job = job;
+  if (Array.isArray(job.segments)) {
+    applySegments(job.segments, false);
+  }
+  const running = !!job.running;
+  $("fileMeta").textContent =
+    `${job.source_name}　${job.width}×${job.height}　${job.fps.toFixed(3)} fps　` +
+    `${jobmodFmt(job.duration)}　段數 ${job.total_segments || 0}`;
+  $("fidelity").value = job.params.fidelity;
+  $("visibility").value = job.params.visibility;
+  $("fidelityVal").textContent = Number(job.params.fidelity).toFixed(2);
+  $("visibilityVal").textContent = Number(job.params.visibility).toFixed(2);
+  const methods = Array.isArray(job.params.restore_methods)
+    ? job.params.restore_methods
+    : String(job.params.restore_method || "codeformer").split("+").filter(Boolean);
+  $("mCodeformer").checked = methods.includes("codeformer");
+  $("mDeblock").checked = methods.includes("deblock");
+  $("mDeblur").checked = methods.includes("deblur");
+  $("mDenoise").checked = methods.includes("denoise");
+  $("deblockStrength").value = job.params.deblock_strength || "medium";
+  $("denoiseStrength").value = job.params.denoise_strength || "medium";
+  syncMethodUi();
+
+  const pg = job.progress || {};
+  const total = pg.total || 0;
+  const current = pg.current || 0;
+  const pct = total > 0 ? Math.min(100, (current / total) * 100) : running ? 5 : 0;
+  $("progressFill").style.width = `${pct}%`;
+  const eta = fmtEta(pg.eta_sec);
+  const msg =
+    `${pg.message || job.phase || ""}　${eta}　` +
+    `分析 ${job.analyze_status}　修復 ${job.restore_status}　輸出 ${job.assemble_status}` +
+    (job.error ? `　錯誤：${job.error}` : "");
+  $("progressText").textContent = msg;
+  $("progressText").classList.toggle("err", !!job.error);
+
+  const thumbsMissing = (job.thumbs_missing || 0) > 0;
+  $("btnAnalyze").disabled = running || (job.analyze_status === "done" && !thumbsMissing);
+  $("btnAnalyze").textContent = thumbsMissing && job.analyze_status === "done" ? "補抽縮圖" : "分析";
+  $("btnRestore").disabled = running || job.analyze_status !== "done";
+  $("btnAssemble").disabled = running || job.analyze_status !== "done";
+  $("btnStop").disabled = !running;
+  $("btnClear").disabled = running;
+  $("btnDownload").classList.toggle("hidden", !job.final_exists);
+  $("btnDownload").href = `/api/jobs/${state.jobId}/final`;
+
+  try {
+    const log = await api(`/api/jobs/${state.jobId}/log`);
+    $("log").textContent = log.text || "";
+    $("log").scrollTop = $("log").scrollHeight;
+  } catch {
+    /* ignore */
+  }
+}
+
+function jobmodFmt(sec) {
+  const s = Math.max(0, Number(sec) || 0);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h) return `${h}:${String(m).padStart(2, "0")}:${r.toFixed(1).padStart(4, "0")}`;
+  return `${String(m).padStart(2, "0")}:${r.toFixed(1).padStart(4, "0")}`;
+}
+
+function pad4(n) {
+  return String(n).padStart(4, "0");
+}
+
+function fingerprint(segs) {
+  const list = Array.isArray(segs) ? segs : [];
+  return list.map((s) => `${s.index}:${s.tag}:${s.status}:${s.has_thumb ? 1 : 0}`).join("|");
+}
+
+function applySegments(raw, force) {
+  const segments = Array.isArray(raw) ? raw : [];
+  state.segs = segments;
+  const fp = fingerprint(segments);
+  const gc = $("gridCount");
+  if (gc) gc.textContent = `${segments.length} 段`;
+  if (!force && fp === state.segFp) {
+    renderSegInfo();
+    return;
+  }
+  state.segFp = fp;
+  renderTimeline();
+  renderGrid();
+  renderRestoreList();
+  renderSegInfo();
+  const noSeg = !segments.length;
+  for (const id of ["btnTagRestore", "btnTagSkip", "btnPreview"]) {
+    const b = $(id);
+    if (b) b.disabled = noSeg;
+  }
+}
+
+async function refreshSegments(force) {
+  if (!state.jobId) return;
+  try {
+    const data = await api(`/api/jobs/${state.jobId}/segments`);
+    applySegments(data && data.segments, force);
+  } catch (e) {
+    applySegments([], true);
+    const gc = $("gridCount");
+    if (gc && state.job && state.job.total_segments) {
+      gc.textContent = `${state.job.total_segments} 段（載入失敗）`;
+    }
+    throw e;
+  }
+}
+
+function renderTimeline() {
+  const el = $("timeline");
+  el.innerHTML = "";
+  for (const s of state.segs) {
+    const d = document.createElement("div");
+    d.className = `tl-seg ${s.tag}${s.index === state.selected ? " on" : ""}`;
+    d.dataset.index = String(s.index);
+    d.style.flex = `${Math.max(s.duration, 0.2)} 0 0`;
+    d.title = `#${pad4(s.index)} ${s.t0_tc}–${s.t1_tc} ${s.tag}`;
+    el.appendChild(d);
+  }
+}
+
+function renderGrid() {
+  const el = $("grid");
+  el.innerHTML = "";
+  if (!state.segs.length) {
+    const n = state.job && state.job.total_segments;
+    const failed = state.job && state.job.analyze_status === "failed";
+    if (n) {
+      el.innerHTML = `<div class="empty">任務標示有 ${n} 段，但分段清單沒載入。請按 Ctrl+F5 重新整理，或再點一次既有任務卡片。</div>`;
+    } else if (failed) {
+      el.innerHTML = '<div class="empty">分析失敗，所以沒有可選的段。請看上方錯誤，修好後再按「分析」。</div>';
+    } else {
+      el.innerHTML = '<div class="empty">還沒有分段。請先按上方「分析」，完成後即可點縮圖選擇、預覽、標修復。</div>';
+    }
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const s of state.segs) {
+    const card = document.createElement("div");
+    card.className = `card ${s.tag}${s.index === state.selected ? " on" : ""}`;
+    card.dataset.index = String(s.index);
+    if (s.has_thumb) {
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.alt = `#${pad4(s.index)}`;
+      img.src = `/api/jobs/${state.jobId}/thumbs/${pad4(s.index)}.jpg`;
+      card.appendChild(img);
+    } else {
+      const ph = document.createElement("div");
+      ph.className = "thumb-ph";
+      ph.textContent = s.t0_tc;
+      card.appendChild(ph);
+    }
+    const cap = document.createElement("div");
+    cap.className = "cap";
+    let tag = "跳過";
+    if (s.tag === "restore") {
+      const m = methodShort(s);
+      tag = s.status === "done" ? `已${m}` : m;
+    }
+    cap.innerHTML = `<b>#${pad4(s.index)}</b><span>${s.t0_tc} · ${tag}</span>`;
+    card.appendChild(cap);
+    frag.appendChild(card);
+  }
+  el.appendChild(frag);
+}
+
+function renderRestoreList() {
+  const items = state.segs.filter((s) => s.tag === "restore");
+  $("restoreCount").textContent = String(items.length);
+  const ul = $("restoreItems");
+  ul.innerHTML = "";
+  if (!items.length) {
+    ul.innerHTML = '<li class="hint">尚未選取任何段</li>';
+    return;
+  }
+  for (const s of items) {
+    const li = document.createElement("li");
+    if (s.index === state.selected) li.classList.add("on");
+    const kind = methodShort(s);
+    const st = s.status === "done" ? "已完成" : s.status === "failed" ? "失敗" : "佇列中";
+    li.innerHTML = `<div>#${String(s.index).padStart(4, "0")}　${kind}　${st}</div>
+      <div class="tc">${s.t0_tc} – ${s.t1_tc}</div>`;
+    li.onclick = () => selectSeg(s.index, false);
+    ul.appendChild(li);
+  }
+}
+
+function currentSeg() {
+  return state.segs.find((s) => s.index === state.selected) || state.segs[0] || null;
+}
+
+function renderSegInfo() {
+  const s = currentSeg();
+  if (!s) {
+    $("segInfo").textContent = "尚未選段";
+    return;
+  }
+  const methodLabel = s.tag === "restore" ? methodShort(s) : "跳過";
+  $("segInfo").innerHTML =
+    `<b>第 ${s.index} 段</b><br>${s.t0_tc} → ${s.t1_tc}（${s.duration.toFixed(2)} 秒）<br>` +
+    `標籤：${methodLabel}　狀態：${s.status}`;
+}
+
+function selectSeg(index, play) {
+  if (!state.segs.length) return;
+  state.selected = index;
+  renderTimeline();
+  renderGrid();
+  renderRestoreList();
+  renderSegInfo();
+  loadPreview(index, !!play);
+}
+
+function loadPreview(index, play) {
+  if (!state.jobId || index == null) return;
+  const player = $("player");
+  const status = $("previewStatus");
+  const url = `/api/jobs/${state.jobId}/segments/${index}/media`;
+  player.muted = true;
+  const already = player.dataset.index === String(index) && player.getAttribute("src");
+  if (already) {
+    status.textContent = "";
+    if (play) player.play().catch(() => {});
+    else player.pause();
+    return;
+  }
+  status.textContent = play ? "載入預覽…" : "";
+  player.onerror = () => {
+    status.textContent = "預覽失敗。請確認原片路徑仍可讀取。";
+  };
+  player.oncanplay = () => {
+    status.textContent = "";
+    if (play) player.play().catch(() => {});
+    else player.pause();
+  };
+  player.dataset.index = String(index);
+  player.pause();
+  player.src = url;
+}
+
+async function setTag(tag) {
+  if (!state.jobId) return;
+  if (!state.segs.length) {
+    alert("還沒有分段，請先按「分析」。");
+    return;
+  }
+  const s = currentSeg();
+  if (!s) {
+    alert("請先在縮圖或時間軸點選一段。");
+    return;
+  }
+  try {
+    const body = { tag };
+    if (tag === "restore") {
+      const ms = selectedMethods();
+      if (!ms.length) {
+        alert("請至少勾一種修復方式。");
+        return;
+      }
+      body.methods = ms;
+    }
+    await api(`/api/jobs/${state.jobId}/segments/${s.index}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    await refreshSegments(true);
+    await refreshJob();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+function startPoll() {
+  stopPoll();
+  state.poll = setInterval(async () => {
+    if (!state.jobId) return;
+    try {
+      const prevCount = state.job && state.job.total_segments;
+      await refreshJob();
+      if (!state.job) return;
+      const running = !!state.job.running;
+      const segsChanged = (state.job.total_segments || 0) !== prevCount;
+      if (running || segsChanged || state.job.analyze_status === "done") {
+        await refreshSegments();
+      }
+      if (!running) await refreshJobs();
+    } catch {
+      /* ignore transient */
+    }
+  }, 1000);
+}
+
+function stopPoll() {
+  if (state.poll) clearInterval(state.poll);
+  state.poll = null;
+}
+
+$("btnBrowse").onclick = async () => {
+  try {
+    const { path } = await api("/api/browse", { method: "POST", body: "{}" });
+    if (path) $("sourcePath").value = path;
+  } catch (e) {
+    alert(e.message);
+  }
+};
+
+$("btnCreate").onclick = async () => {
+  const source_path = $("sourcePath").value.trim();
+  if (!source_path) {
+    alert("請先選擇 MKV");
+    return;
+  }
+  try {
+    const job = await api("/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({ source_path }),
+    });
+    await refreshJobs();
+    $("jobSelect").value = job.job_id;
+    await loadJob(job.job_id);
+  } catch (e) {
+    alert(e.message);
+  }
+};
+
+$("btnOpen").onclick = async () => {
+  const id = $("jobSelect").value;
+  if (!id) return;
+  await loadJob(id);
+};
+
+async function postAction(path) {
+  try {
+    await api(path, { method: "POST", body: "{}" });
+    await refreshJob();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+$("btnAnalyze").onclick = () => postAction(`/api/jobs/${state.jobId}/analyze`);
+$("btnRestore").onclick = () => {
+  const n = state.segs.filter((s) => s.tag === "restore").length;
+  if (!n) {
+    alert("尚未選取任何修復段（預設全部跳過）。請先用 F 標 3–4 段。");
+    return;
+  }
+  postAction(`/api/jobs/${state.jobId}/restore`);
+};
+$("btnAssemble").onclick = () => {
+  const pending = state.segs.filter((s) => s.tag === "restore" && s.status !== "done");
+  if (pending.length) {
+    alert(`還有 ${pending.length} 段修復未完成，請先開始修復或改回跳過。`);
+    return;
+  }
+  postAction(`/api/jobs/${state.jobId}/assemble`);
+};
+$("btnStop").onclick = () => postAction(`/api/jobs/${state.jobId}/stop`);
+$("btnClear").onclick = async () => {
+  if (!confirm("清除已選修復段的輸出並重跑？未選的段不會動。")) return;
+  await postAction(`/api/jobs/${state.jobId}/clear-restore`);
+  await refreshSegments();
+};
+
+$("btnTagRestore").onclick = () => setTag("restore");
+$("btnTagSkip").onclick = () => setTag("skip");
+$("btnPreview").onclick = () => {
+  const s = currentSeg();
+  if (!s) {
+    alert("還沒有分段，請先按「分析」。");
+    return;
+  }
+  loadPreview(s.index, true);
+};
+
+$("grid").addEventListener("click", (ev) => {
+  const card = ev.target.closest("[data-index]");
+  if (!card) return;
+  selectSeg(Number(card.dataset.index), false);
+});
+$("timeline").addEventListener("click", (ev) => {
+  const bit = ev.target.closest("[data-index]");
+  if (!bit) return;
+  selectSeg(Number(bit.dataset.index), false);
+});
+
+let paramTimer = null;
+function onParam() {
+  $("fidelityVal").textContent = Number($("fidelity").value).toFixed(2);
+  $("visibilityVal").textContent = Number($("visibility").value).toFixed(2);
+  clearTimeout(paramTimer);
+  paramTimer = setTimeout(async () => {
+    if (!state.jobId) return;
+    await api(`/api/jobs/${state.jobId}/params`, {
+      method: "POST",
+      body: JSON.stringify({
+        fidelity: Number($("fidelity").value),
+        visibility: Number($("visibility").value),
+        restore_methods: selectedMethods(),
+        deblock_strength: $("deblockStrength").value,
+        denoise_strength: $("denoiseStrength").value,
+      }),
+    });
+  }, 300);
+}
+function selectedMethods() {
+  const m = [];
+  if ($("mCodeformer") && $("mCodeformer").checked) m.push("codeformer");
+  if ($("mDeblock") && $("mDeblock").checked) m.push("deblock");
+  if ($("mDeblur") && $("mDeblur").checked) m.push("deblur");
+  if ($("mDenoise") && $("mDenoise").checked) m.push("denoise");
+  return m;
+}
+
+function methodShort(s) {
+  const ms = Array.isArray(s.methods)
+    ? s.methods
+    : String(s.method || "codeformer").split("+").filter(Boolean);
+  const names = { codeformer: "修臉", deblock: "去塊", deblur: "去糊", denoise: "降噪" };
+  return ms.map((x) => names[x] || x).join("+") || "修臉";
+}
+
+function syncMethodUi() {
+  const ms = selectedMethods();
+  const cf = ms.includes("codeformer");
+  const blockish = ms.includes("deblock") || ms.includes("deblur");
+  const denoise = ms.includes("denoise");
+  $("fidelityRow").classList.toggle("hidden", !cf);
+  $("visibilityRow").classList.toggle("hidden", !cf);
+  $("deblockRow").classList.toggle("hidden", !blockish);
+  $("denoiseRow").classList.toggle("hidden", !denoise);
+}
+
+$("fidelity").oninput = onParam;
+$("visibility").oninput = onParam;
+$("mCodeformer").onchange = () => {
+  syncMethodUi();
+  onParam();
+};
+$("mDeblock").onchange = () => {
+  syncMethodUi();
+  onParam();
+};
+$("mDeblur").onchange = () => {
+  syncMethodUi();
+  onParam();
+};
+$("mDenoise").onchange = () => {
+  syncMethodUi();
+  onParam();
+};
+$("deblockStrength").onchange = onParam;
+$("denoiseStrength").onchange = onParam;
+
+window.addEventListener("keydown", (ev) => {
+  const t = ev.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+  if (!state.jobId || !state.segs.length) return;
+  if (ev.key === "f" || ev.key === "F") {
+    ev.preventDefault();
+    setTag("restore");
+  } else if (ev.key === "s" || ev.key === "S") {
+    ev.preventDefault();
+    setTag("skip");
+  } else if (ev.key === " ") {
+    ev.preventDefault();
+    const p = $("player");
+    if (!p.src || p.dataset.index !== String(state.selected)) loadPreview(state.selected, true);
+    else if (p.paused) p.play();
+    else p.pause();
+  } else if (ev.key === "ArrowLeft") {
+    ev.preventDefault();
+    const i = Math.max(0, state.selected - 1);
+    selectSeg(i, false);
+  } else if (ev.key === "ArrowRight") {
+    ev.preventDefault();
+    const i = Math.min(state.segs.length - 1, state.selected + 1);
+    selectSeg(i, false);
+  }
+});
+
+(async function boot() {
+  await refreshHealth();
+  let jobs = [];
+  try {
+    jobs = (await refreshJobs()) || [];
+  } catch {
+    /* ignore */
+  }
+  const preferred =
+    jobs.find((j) => (j.total_segments || 0) > 0) || jobs[0];
+  if (preferred && !state.jobId) {
+    $("jobSelect").value = preferred.job_id;
+    try {
+      await loadJob(preferred.job_id);
+    } catch (e) {
+      console.warn(e);
+    }
+  }
+})();
+setInterval(refreshHealth, 15000);

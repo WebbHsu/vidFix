@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+work/
+weights/
+*.partial
+*.log
+
+# local IDE
+.idea/
+.vscode/
+*.swp
