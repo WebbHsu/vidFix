@@ -2,7 +2,7 @@
 
 For the **next agent**. Read `../AGENTS.md` and `../spec.md` first, then this file for *why the code is this way* and what is still open.
 
-Last updated: 2026-09-28.
+Last updated: 2026-09-29.
 
 ## Current product state
 
@@ -19,7 +19,8 @@ Working today:
 - Assemble: skip clips re-encoded `skip_v2`, concat durations + genpts, original audio copy.
 - Offline face-track smoothing (two-pass, Savitzky–Golay when scipy is installed).
 - Ellipse + Poisson paste (no square “face box” if mask is left as-is).
-- Keep/drop editing (user request, extends spec D): per-segment `keep` (missing = keep), D / card button / timeline right-click / bulk buttons. Dropped segments are not restored and not assembled; their `out/` files stay. All-kept assemble runs the old stream-copy code unchanged (same packets as before); with drops, audio is cut per kept run to PCM with sample-exact boundaries and re-encoded to AAC (see architecture “Assemble”).
+- Keep/drop editing (user request, extends spec D): per-segment `keep` (missing = keep), D / card button / timeline right-click / bulk buttons. Dropped segments are not restored and not assembled; their `out/` files stay.
+- Multi-select tagging (user request, 2026-09-29): Ctrl/Cmd/Shift click in grid and timeline, Shift+arrows, Ctrl+A, Esc. F/S/D apply to every selected segment with one bulk request (`POST /api/jobs/{id}/tags`, existing `POST /keep` with `indices`). `worker.set_tag` is a thin wrapper over `set_tags`; keep the per-segment output-deletion rules in one place. All-kept assemble runs the old stream-copy code unchanged (same packets as before); with drops, audio is cut per kept run to PCM with sample-exact boundaries and re-encoded to AAC (see architecture “Assemble”).
 
 There is at least one live job under `work/` with ~350 segments, thumbs, skip outputs, and a `final.mkv`. Treat `work/` as user data. Do not delete it.
 
@@ -106,7 +107,7 @@ keeps 1280×720 / 250 frames / sequential frame bar / joins intact with skip seg
 - No automated tests except `python -m vidfix.plan`. There is no pytest suite.
 - Preview MP4 uses simple `-ss` before `-i` (not hybrid). Fine for watching; do not use previews as assemble sources.
 - Changing strengths/methods never auto-rebuilds outputs (spec). Users forget this constantly — remind them.
-- Static cache: bump `app.js?v=` / `app.css?v=` in `index.html` on every frontend change (js is `v=19`, css `v=16` as of this file).
+- Static cache: bump `app.js?v=` / `app.css?v=` in `index.html` on every frontend change (js is `v=20`, css `v=17` as of this file).
 - Keep/drop: only the dropped-segments assemble path re-encodes audio. Do not “simplify” it to `-c:a copy` + cut (AAC frame granularity drifts at each join) or to a single `asplit`/`atrim`/`concat` graph (RAM on long films). The temp name must stay `NNNN.partial.wav` (real extension, same lesson as thumbs).
 - Seen while testing keep/drop (not changed): the all-kept copy path puts the source AAC’s first packet at the video start and loses the ~21 ms encoder-delay offset, so audio is ~21 ms late (under one frame). And the hybrid seek can start a skip clip one frame late when `t0 - 2.5` falls between frames (it showed up on a video-only 25 fps test file with segment starts at whole seconds), probably because `setpts=PTS-STARTPTS` resets to the first frame after the coarse seek, not to the coarse time. Both affect the old path too; not touched here. The last segment’s `t1` is the container duration, which can be one frame past the last video frame.
 - `torch` version on this machine has been CUDA 12.x (cu124 / cu128). Do not `pip install torch` from PyPI CPU wheels into `.venv`.

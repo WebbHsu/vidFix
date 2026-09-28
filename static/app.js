@@ -5,6 +5,8 @@ const state = {
   job: null,
   segs: [],
   selected: 0,
+  sel: new Set([0]),
+  anchor: 0,
   poll: null,
   busy: false,
   segFp: "",
@@ -120,6 +122,8 @@ async function loadJob(id) {
   state.jobId = id;
   state.segFp = "";
   state.selected = 0;
+  state.sel = new Set([0]);
+  state.anchor = 0;
   $("workspace").classList.remove("hidden");
   try {
     await refreshJob();
@@ -236,11 +240,13 @@ function keptStats() {
 function applySegments(raw, force) {
   const segments = Array.isArray(raw) ? raw : [];
   state.segs = segments;
+  pruneSelection();
   const fp = fingerprint(segments);
   const gc = $("gridCount");
   if (gc) gc.textContent = `${segments.length} 段`;
   if (!force && fp === state.segFp) {
     renderSegInfo();
+    renderSelCount();
     return;
   }
   state.segFp = fp;
@@ -248,6 +254,7 @@ function applySegments(raw, force) {
   renderGrid();
   renderRestoreList();
   renderSegInfo();
+  renderSelCount();
   const noSeg = !segments.length;
   for (const id of ["btnTagRestore", "btnTagSkip", "btnPreview", "btnKeep", "btnKeepAll", "btnDropAll", "btnKeepInvert"]) {
     const b = $(id);
@@ -276,10 +283,10 @@ function renderTimeline() {
   for (const s of state.segs) {
     const d = document.createElement("div");
     const kept = isKept(s);
-    d.className = `tl-seg ${s.tag}${kept ? "" : " dropped"}${s.index === state.selected ? " on" : ""}`;
+    d.className = `tl-seg ${s.tag}${kept ? "" : " dropped"}${s.index === state.selected ? " on" : ""}${state.sel.has(s.index) ? " sel" : ""}`;
     d.dataset.index = String(s.index);
     d.style.flex = `${Math.max(s.duration, 0.2)} 0 0`;
-    d.title = `#${pad4(s.index)} ${s.t0_tc}–${s.t1_tc} ${s.tag} · ${kept ? "保留" : "捨去"}（右鍵切換）`;
+    d.title = `#${pad4(s.index)} ${s.t0_tc}–${s.t1_tc} ${s.tag} · ${kept ? "保留" : "捨去"}（右鍵切換，Ctrl/Shift 多選）`;
     el.appendChild(d);
   }
 }
@@ -303,7 +310,7 @@ function renderGrid() {
   for (const s of state.segs) {
     const card = document.createElement("div");
     const kept = isKept(s);
-    card.className = `card ${s.tag}${kept ? "" : " dropped"}${s.index === state.selected ? " on" : ""}`;
+    card.className = `card ${s.tag}${kept ? "" : " dropped"}${s.index === state.selected ? " on" : ""}${state.sel.has(s.index) ? " sel" : ""}`;
     card.dataset.index = String(s.index);
     if (s.has_thumb) {
       const img = document.createElement("img");
@@ -422,6 +429,27 @@ function toggleKeep(index) {
   setKeep(index, !isKept(s));
 }
 
+// D on a selection: any kept -> drop all, otherwise keep all. One request.
+async function toggleKeepMany(indices) {
+  if (!state.jobId || !indices.length) return;
+  if (indices.length === 1) {
+    toggleKeep(indices[0]);
+    return;
+  }
+  const byIdx = new Map(state.segs.map((s) => [s.index, s]));
+  const anyKept = indices.some((i) => isKept(byIdx.get(i)));
+  try {
+    await api(`/api/jobs/${state.jobId}/keep`, {
+      method: "POST",
+      body: JSON.stringify({ action: anyKept ? "drop" : "keep", indices }),
+    });
+    await refreshSegments(true);
+    await refreshJob();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 async function bulkKeep(action) {
   if (!state.jobId || !state.segs.length) return;
   const mixed = state.segs.some((s) => isKept(s)) && state.segs.some((s) => !isKept(s));
@@ -444,11 +472,128 @@ async function bulkKeep(action) {
 function selectSeg(index, play) {
   if (!state.segs.length) return;
   state.selected = index;
-  renderTimeline();
-  renderGrid();
+  state.sel = new Set([index]);
+  state.anchor = index;
+  renderSelection();
+  loadPreview(index, !!play);
+}
+
+function segPos(index) {
+  return state.segs.findIndex((s) => s.index === index);
+}
+
+function rangeIndices(a, b) {
+  let i = segPos(a);
+  let j = segPos(b);
+  if (i < 0) i = j;
+  if (i > j) [i, j] = [j, i];
+  return state.segs.slice(i, j + 1).map((s) => s.index);
+}
+
+// Indices the next F/S/D applies to, in segment order. Never empty.
+function selectedIndices() {
+  const out = state.segs.filter((s) => state.sel.has(s.index)).map((s) => s.index);
+  if (out.length) return out;
+  const cur = currentSeg();
+  return cur ? [cur.index] : [];
+}
+
+function pruneSelection() {
+  const have = new Set(state.segs.map((s) => s.index));
+  for (const i of [...state.sel]) if (!have.has(i)) state.sel.delete(i);
+  if (!state.sel.size && state.segs.length) {
+    const cur = currentSeg();
+    state.sel.add(cur.index);
+    state.anchor = cur.index;
+  }
+}
+
+// File-explorer style: plain = single, Ctrl/Cmd = toggle, Shift = range from anchor,
+// Ctrl+Shift = add range. Current (preview / segInfo) follows the clicked segment.
+function clickSeg(index, ev) {
+  if (!state.segs.length) return;
+  const ctrl = ev.ctrlKey || ev.metaKey;
+  if (!ctrl && !ev.shiftKey) {
+    selectSeg(index, false);
+    return;
+  }
+  if (ev.shiftKey) {
+    const range = rangeIndices(state.anchor, index);
+    if (!ctrl) state.sel = new Set(range);
+    else for (const i of range) state.sel.add(i);
+  } else if (state.sel.has(index)) {
+    if (state.sel.size > 1) state.sel.delete(index);
+    state.anchor = index;
+  } else {
+    state.sel.add(index);
+    state.anchor = index;
+  }
+  state.selected = index;
+  renderSelection();
+  loadPreview(index, false);
+}
+
+function moveCurrent(step, extend) {
+  const pos = segPos(state.selected);
+  const next = state.segs[Math.min(state.segs.length - 1, Math.max(0, (pos < 0 ? 0 : pos) + step))];
+  if (!next) return;
+  if (!extend) {
+    selectSeg(next.index, false);
+    return;
+  }
+  state.selected = next.index;
+  state.sel = new Set(rangeIndices(state.anchor, next.index));
+  renderSelection();
+  loadPreview(next.index, false);
+}
+
+function selectAll() {
+  state.sel = new Set(state.segs.map((s) => s.index));
+  renderSelection();
+}
+
+function collapseSelection() {
+  const cur = currentSeg();
+  if (!cur) return;
+  state.selected = cur.index;
+  state.sel = new Set([cur.index]);
+  state.anchor = cur.index;
+  renderSelection();
+}
+
+// Class-only update so large grids keep their <img> nodes and scroll position.
+function renderSelection() {
+  for (const root of [$("grid"), $("timeline")]) {
+    for (const el of root.querySelectorAll("[data-index]")) {
+      const i = Number(el.dataset.index);
+      el.classList.toggle("on", i === state.selected);
+      el.classList.toggle("sel", state.sel.has(i));
+    }
+  }
+  scrollGridTo(state.selected);
   renderRestoreList();
   renderSegInfo();
-  loadPreview(index, !!play);
+  renderSelCount();
+}
+
+// Scroll only the grid pane, never the page.
+function scrollGridTo(index) {
+  const grid = $("grid");
+  const card = grid.querySelector(`[data-index="${index}"]`);
+  if (!card) return;
+  const top = card.offsetTop - grid.offsetTop;
+  if (top < grid.scrollTop) grid.scrollTop = top - 10;
+  else if (top + card.offsetHeight > grid.scrollTop + grid.clientHeight) {
+    grid.scrollTop = top + card.offsetHeight - grid.clientHeight + 10;
+  }
+}
+
+function renderSelCount() {
+  const n = state.segs.length ? selectedIndices().length : 0;
+  for (const el of document.querySelectorAll(".sel-count")) {
+    el.textContent = n ? `已選 ${n} 段` : "";
+    el.classList.toggle("multi", n > 1);
+  }
 }
 
 function loadPreview(index, play) {
@@ -484,13 +629,13 @@ async function setTag(tag) {
     alert("還沒有分段，請先按「分析」。");
     return;
   }
-  const s = currentSeg();
-  if (!s) {
+  const indices = selectedIndices();
+  if (!indices.length) {
     alert("請先在縮圖或時間軸點選一段。");
     return;
   }
   try {
-    const body = { tag };
+    const body = { tag, indices };
     if (tag === "restore") {
       const ms = selectedMethods();
       if (!ms.length) {
@@ -499,8 +644,8 @@ async function setTag(tag) {
       }
       body.methods = ms;
     }
-    await api(`/api/jobs/${state.jobId}/segments/${s.index}`, {
-      method: "PATCH",
+    await api(`/api/jobs/${state.jobId}/tags`, {
+      method: "POST",
       body: JSON.stringify(body),
     });
     await refreshSegments(true);
@@ -612,10 +757,7 @@ $("btnClear").onclick = async () => {
 
 $("btnTagRestore").onclick = () => setTag("restore");
 $("btnTagSkip").onclick = () => setTag("skip");
-$("btnKeep").onclick = () => {
-  const s = currentSeg();
-  if (s) toggleKeep(s.index);
-};
+$("btnKeep").onclick = () => toggleKeepMany(selectedIndices());
 $("btnKeepAll").onclick = () => bulkKeep("keep");
 $("btnDropAll").onclick = () => bulkKeep("drop");
 $("btnKeepInvert").onclick = () => bulkKeep("invert");
@@ -635,19 +777,26 @@ $("grid").addEventListener("click", (ev) => {
     toggleKeep(Number(card.dataset.index));
     return;
   }
-  selectSeg(Number(card.dataset.index), false);
+  clickSeg(Number(card.dataset.index), ev);
 });
 $("timeline").addEventListener("click", (ev) => {
   const bit = ev.target.closest("[data-index]");
   if (!bit) return;
-  selectSeg(Number(bit.dataset.index), false);
+  clickSeg(Number(bit.dataset.index), ev);
 });
 $("timeline").addEventListener("contextmenu", (ev) => {
   const bit = ev.target.closest("[data-index]");
   if (!bit) return;
   ev.preventDefault();
-  toggleKeep(Number(bit.dataset.index));
+  const i = Number(bit.dataset.index);
+  toggleKeepMany(state.sel.has(i) ? selectedIndices() : [i]);
 });
+// Shift/Ctrl-click must not start a browser text selection.
+for (const id of ["grid", "timeline"]) {
+  $(id).addEventListener("mousedown", (ev) => {
+    if (ev.shiftKey || ev.ctrlKey || ev.metaKey) ev.preventDefault();
+  });
+}
 
 let paramTimer = null;
 function onParam() {
@@ -730,6 +879,19 @@ window.addEventListener("keydown", (ev) => {
   const t = ev.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
   if (!state.jobId || !state.segs.length) return;
+  const mod = ev.ctrlKey || ev.metaKey;
+  if ((ev.key === "a" || ev.key === "A") && mod && !ev.altKey) {
+    ev.preventDefault();
+    selectAll();
+    return;
+  }
+  if (ev.key === "Escape") {
+    collapseSelection();
+    return;
+  }
+  if (mod || ev.altKey) {
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+  }
   if (ev.key === "f" || ev.key === "F") {
     ev.preventDefault();
     setTag("restore");
@@ -737,10 +899,8 @@ window.addEventListener("keydown", (ev) => {
     ev.preventDefault();
     setTag("skip");
   } else if (ev.key === "d" || ev.key === "D") {
-    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     ev.preventDefault();
-    const s = currentSeg();
-    if (s) toggleKeep(s.index);
+    toggleKeepMany(selectedIndices());
   } else if (ev.key === " ") {
     ev.preventDefault();
     const p = $("player");
@@ -749,12 +909,10 @@ window.addEventListener("keydown", (ev) => {
     else p.pause();
   } else if (ev.key === "ArrowLeft") {
     ev.preventDefault();
-    const i = Math.max(0, state.selected - 1);
-    selectSeg(i, false);
+    moveCurrent(-1, ev.shiftKey);
   } else if (ev.key === "ArrowRight") {
     ev.preventDefault();
-    const i = Math.min(state.segs.length - 1, state.selected + 1);
-    selectSeg(i, false);
+    moveCurrent(1, ev.shiftKey);
   }
 });
 

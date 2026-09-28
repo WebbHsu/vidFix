@@ -124,6 +124,7 @@ Allowed restore method ids: `codeformer`, `deblock`, `deblur`, `denoise`, `reale
 | GET | `/api/jobs` | list |
 | GET | `/api/jobs/{id}` | job + packed segments |
 | PATCH | `/api/jobs/{id}/segments/{i}` | tag skip/restore; optional methods |
+| POST | `/api/jobs/{id}/tags` | `{tag, indices, methods?}`; bulk tag, one locked `segments.jsonl` write; unknown index = 400, nothing written |
 | PATCH | `/api/jobs/{id}/segments/{i}/keep` | `{keep: bool}` |
 | POST | `/api/jobs/{id}/keep` | `{action: keep\|drop\|invert, indices?}`; no indices = all segments |
 | POST | `/api/jobs/{id}/params` | fidelity, visibility, methods, strengths |
@@ -154,6 +155,7 @@ No face detection in this phase.
 
 - Space / click plays `previews/NNNN.mp4` generated from the **source** with `-ss t0 -t dur` (not hybrid seek; previews are not used for concat).
 - F = restore, S = skip. Tagging restore snapshots current `restore_methods` onto the segment.
+- Multi-select (file-explorer style): click = single, Ctrl/Cmd+click toggle, Shift+click range from anchor, Ctrl+Shift+click add range, Shift+←/→ extend, Ctrl+A all, Esc back to current. F/S go through `POST /tags` (`worker.set_tags`, same per-segment rules as `set_tag`, which now wraps it); D and right-click on a selected timeline segment send one `POST /keep` with `indices` (any kept → drop all, else keep all). Space preview and segInfo stay on the current segment.
 - D = keep/drop toggle (also card button, timeline right-click, bulk keep-all / drop-all / invert). `worker.set_keep` writes `segments.jsonl` via `save_segments` (tmp + `os.replace`) under the job lock, never touches `out/`, and resets `assemble_status`/`final_path` when something changed. Blocked only while assemble runs.
 - Changing a done restore clip’s methods, or skip→restore, deletes that `out/` file and sets `pending`.
 - Restore→skip deletes processed outputs (`out_kind` in restore/deblock/deblur/denoise).
@@ -251,6 +253,7 @@ Then `-frames:v N` with tessellating `N`. Used by skip encode, deblock encode, a
 - `onParam` POSTs fidelity, visibility, restore_methods, deblock_strength, denoise_strength, realesrgan_strength (debounced 300ms).
 - Thumb cards must not `appendChild` an undefined `img` when `has_thumb` is false (use placeholder).
 - Grid must not be `grid-auto-rows: 1fr` inside a short `overflow:hidden` pane.
+- Selection state is `state.sel` (Set of indices) + `state.anchor`; `state.selected` is the current segment. `.sel` (blue outline + ✓ badge on cards, blue bottom bar on the timeline) is separate from `.on` (current, yellow), `.restore` and `.dropped`. Selection changes toggle classes via `renderSelection()` instead of rebuilding the grid.
 
 ## Dependencies
 

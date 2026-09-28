@@ -31,7 +31,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 - Torch is installed separately (CUDA wheel, not in `requirements.txt`).
 - ffmpeg / ffprobe must be on `PATH`.
 - Weights: `weights/CodeFormer/codeformer.pth`, `weights/insightface/models/buffalo_l/*.onnx`, `weights/RealESRGAN/realesr-general-x4v3.pth` (+ optional `realesr-general-wdn-x4v3.pth` for denoise DNI).
-- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=19`, css `v=16`). Ask the user to Ctrl+F5.
+- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=20`, css `v=17`). Ask the user to Ctrl+F5.
 
 ## Where to edit
 

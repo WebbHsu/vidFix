@@ -103,57 +103,74 @@ def stop(job_id: str) -> None:
 
 
 def set_tag(job_id: str, index: int, tag: str, method: str | None = None) -> dict:
+    res = set_tags(job_id, [index], tag, method)
+    return res["segments"][0]
+
+
+def set_tags(job_id: str, indices: list[int], tag: str, method=None) -> dict:
+    """Tag several segments in one locked read-modify-write of segments.jsonl.
+
+    Per-segment rules match the single-segment path: skip deletes processed outputs,
+    restore keeps a done clip only when its methods are unchanged.
+    """
     if tag not in ("skip", "restore"):
         raise ValueError("標籤只能是 skip 或 restore")
+    wanted = [int(i) for i in dict.fromkeys(int(i) for i in (indices or []))]
+    if not wanted:
+        raise ValueError("請至少指定一段")
     job = jobmod.load_job(job_id)
     if job.get("restore_status") == "running" or job.get("assemble_status") == "running":
         raise RuntimeError("執行中無法改標籤，請先停止")
-    seg = None
-    for s in jobmod.load_segments(job_id):
-        if int(s["index"]) == int(index):
-            seg = s
-            break
-    if seg is None:
-        raise KeyError(f"沒有第 {index} 段")
-
-    fields: dict = {"tag": tag}
-    outp = jobmod.segment_out_path(job_id, index)
-    # Real-ESRGAN (with or without CodeFormer) outputs are out_kind "restore".
-    processed = ("restore", "deblock", "deblur", "denoise")
-    if tag == "skip":
-        if outp.is_file() and seg.get("out_kind") in processed:
-            try:
-                outp.unlink()
-            except OSError:
-                pass
-        fields["status"] = "pending"
-        fields["out_kind"] = None
-        fields["method"] = None
-        fields["error"] = None
-    else:
+    methods: list[str] = []
+    if tag == "restore":
         raw = method if method is not None else (job.get("params") or {}).get("restore_methods")
         methods = jobmod.normalize_methods(raw)
         if not methods:
             methods = jobmod.methods_for_segment({}, job.get("params") or {})
-        fields["methods"] = methods
-        fields["method"] = "+".join(methods)
-        if (
-            seg.get("status") == "done"
-            and outp.is_file()
-            and jobmod.normalize_methods(seg.get("methods") or seg.get("method")) == methods
-        ):
-            fields["status"] = "done"
-        else:
-            fields["status"] = "pending"
-            if outp.is_file() and seg.get("out_kind") in (*processed, "skip", "skip_v2"):
-                try:
-                    outp.unlink()
-                except OSError:
-                    pass
+    # Real-ESRGAN (with or without CodeFormer) outputs are out_kind "restore".
+    processed = ("restore", "deblock", "deblur", "denoise")
+    with jobmod._lock(job_id):
+        segs = jobmod.load_segments(job_id)
+        by_index = {int(s["index"]): s for s in segs}
+        missing = [i for i in wanted if i not in by_index]
+        if missing:
+            raise KeyError(f"沒有第 {min(missing)} 段")
+        updated = []
+        for index in wanted:
+            seg = by_index[index]
+            fields: dict = {"tag": tag}
+            outp = jobmod.segment_out_path(job_id, index)
+            if tag == "skip":
+                if outp.is_file() and seg.get("out_kind") in processed:
+                    try:
+                        outp.unlink()
+                    except OSError:
+                        pass
+                fields["status"] = "pending"
                 fields["out_kind"] = None
-            fields["error"] = None
-    updated = jobmod.update_segment(job_id, index, **fields)
-    segs = jobmod.load_segments(job_id)
+                fields["method"] = None
+                fields["error"] = None
+            else:
+                fields["methods"] = list(methods)
+                fields["method"] = "+".join(methods)
+                if (
+                    seg.get("status") == "done"
+                    and outp.is_file()
+                    and jobmod.normalize_methods(seg.get("methods") or seg.get("method")) == methods
+                ):
+                    fields["status"] = "done"
+                else:
+                    fields["status"] = "pending"
+                    if outp.is_file() and seg.get("out_kind") in (*processed, "skip", "skip_v2"):
+                        try:
+                            outp.unlink()
+                        except OSError:
+                            pass
+                        fields["out_kind"] = None
+                    fields["error"] = None
+            seg.update(fields)
+            updated.append(seg)
+        jobmod.save_segments(job_id, segs)
     restore_pending = any(jobmod.needs_restore(s) for s in segs)
     patch = {
         "assemble_status": "pending",
@@ -163,7 +180,14 @@ def set_tag(job_id: str, index: int, tag: str, method: str | None = None) -> dic
     if restore_pending:
         patch["restore_status"] = "pending"
     jobmod.update_job(job_id, **patch)
-    return updated
+    if len(updated) > 1:
+        label = "修復" if tag == "restore" else "跳過"
+        jobmod.append_log(job_id, f"批次標{label} {len(updated)} 段")
+    return {
+        "count": len(updated),
+        "restore_count": sum(1 for s in segs if s.get("tag") == "restore"),
+        "segments": updated,
+    }
 
 
 def set_keep(

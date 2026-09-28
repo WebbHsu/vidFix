@@ -40,6 +40,13 @@ class TagBody(BaseModel):
     methods: list[str] | None = None
 
 
+class TagBulkBody(BaseModel):
+    tag: str
+    indices: list[int]
+    method: str | None = None
+    methods: list[str] | None = None
+
+
 class KeepBody(BaseModel):
     keep: bool
 
@@ -206,6 +213,22 @@ def patch_segment(job_id: str, index: int, body: TagBody) -> dict[str, Any]:
     except (KeyError, ValueError) as e:
         raise _err(400, str(e)) from e
     return seg
+
+
+@app.post("/api/jobs/{job_id}/tags")
+def bulk_tag(job_id: str, body: TagBulkBody) -> dict[str, Any]:
+    """Tag every index in one request and one segments.jsonl write."""
+    try:
+        raw = body.methods if body.methods is not None else body.method
+        return worker.set_tags(job_id, body.indices, body.tag, raw)
+    except RuntimeError as e:
+        raise _err(409, str(e)) from e
+    except FileNotFoundError as e:
+        raise _err(404, str(e)) from e
+    except KeyError as e:
+        raise _err(400, str(e.args[0]) if e.args else str(e)) from e
+    except ValueError as e:
+        raise _err(400, str(e)) from e
 
 
 @app.patch("/api/jobs/{job_id}/segments/{index}/keep")

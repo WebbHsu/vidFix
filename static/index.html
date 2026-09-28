@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>vidFix</title>
-  <link rel="stylesheet" href="/static/app.css?v=16" />
+  <link rel="stylesheet" href="/static/app.css?v=17" />
 </head>
 <body>
   <header class="top">
@@ -94,7 +94,7 @@
         <ul id="restoreItems"></ul>
       </aside>
       <div class="stage">
-        <div id="timeline" class="timeline" title="時間軸：灰=跳過，橙=修復，暗色斜紋=捨去（不進成品）。右鍵點一段可切換保留／捨去"></div>
+        <div id="timeline" class="timeline" title="時間軸：灰=跳過，橙=修復，暗色斜紋=捨去（不進成品），藍色底線=已選。Ctrl/Shift+點 多選；右鍵切換保留／捨去（點在已選段上會套用到全部已選段）"></div>
         <div class="player-row">
           <div class="player-wrap">
             <video id="player" controls playsinline muted></video>
@@ -102,6 +102,7 @@
           </div>
           <div class="player-side">
             <div id="segInfo" class="seg-info">尚未選段</div>
+            <div class="sel-count"></div>
             <div class="seg-btns">
               <button type="button" id="btnPreview">預覽此段 (Space)</button>
               <button type="button" id="btnTagRestore" class="primary">修復 (F)</button>
@@ -116,11 +117,11 @@
                 <button type="button" id="btnKeepInvert">反選</button>
               </div>
             </div>
-            <p class="keys">點縮圖選段，F 修復、S 跳過、D 保留／捨去、Space 預覽、← → 切段。捨去的段不會修復，也不會進成品。</p>
+            <p class="keys">點縮圖選段，F 修復、S 跳過、D 保留／捨去、Space 預覽、← → 切段。Ctrl+點 加選／取消、Shift+點 或 Shift+← → 連續選取、Ctrl+A 全選、Esc 取消多選；F／S／D 會套用到所有已選段。捨去的段不會修復，也不會進成品。</p>
           </div>
         </div>
         <div class="grid-panel">
-          <div class="grid-head">縮圖網格 <span id="gridCount">0 段</span>　（可捲動）</div>
+          <div class="grid-head">縮圖網格 <span id="gridCount">0 段</span>　<span class="sel-count"></span>　（可捲動，Ctrl/Shift 多選）</div>
           <div id="grid" class="grid"></div>
         </div>
       </div>
@@ -128,6 +129,6 @@
     <pre id="log" class="log"></pre>
   </section>
 
-  <script src="/static/app.js?v=19"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>
