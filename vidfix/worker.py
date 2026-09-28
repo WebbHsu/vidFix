@@ -71,8 +71,7 @@ def start_restore(job_id: str) -> None:
         raise RuntimeError("請先完成分析")
     params = job.get("params") or {}
     need_gpu = any(
-        s.get("tag") == "restore"
-        and s.get("status") != "done"
+        jobmod.needs_restore(s)
         and "codeformer" in jobmod.methods_for_segment(s, params)
         for s in jobmod.load_segments(job_id)
     )
@@ -91,6 +90,8 @@ def start_assemble(job_id: str) -> None:
     job = jobmod.load_job(job_id)
     if job.get("analyze_status") != "done":
         raise RuntimeError("請先完成分析")
+    if not any(jobmod.is_kept(s) for s in jobmod.load_segments(job_id)):
+        raise RuntimeError(assemble.NO_KEPT_MSG)
     _spawn(job_id, lambda: assemble.run_assemble(job_id), "assemble")
 
 
@@ -149,7 +150,7 @@ def set_tag(job_id: str, index: int, tag: str, method: str | None = None) -> dic
             fields["error"] = None
     updated = jobmod.update_segment(job_id, index, **fields)
     segs = jobmod.load_segments(job_id)
-    restore_pending = any(s.get("tag") == "restore" and s.get("status") != "done" for s in segs)
+    restore_pending = any(jobmod.needs_restore(s) for s in segs)
     patch = {
         "assemble_status": "pending",
         "final_path": None,
@@ -159,6 +160,53 @@ def set_tag(job_id: str, index: int, tag: str, method: str | None = None) -> dic
         patch["restore_status"] = "pending"
     jobmod.update_job(job_id, **patch)
     return updated
+
+
+def set_keep(
+    job_id: str,
+    indices: list[int] | None = None,
+    keep: bool | None = None,
+    invert: bool = False,
+) -> dict:
+    """Set the output keep flag. indices=None means every segment.
+
+    Outputs in out/ are left alone so a dropped segment can be re-kept for free.
+    """
+    if keep is None and not invert:
+        raise ValueError("請指定保留或捨去")
+    job = jobmod.load_job(job_id)
+    if job.get("assemble_status") == "running":
+        raise RuntimeError("輸出中無法改保留／捨去，請先停止")
+    with jobmod._lock(job_id):
+        segs = jobmod.load_segments(job_id)
+        if not segs:
+            raise RuntimeError("尚未分析，沒有分段。")
+        wanted = None if indices is None else {int(i) for i in indices}
+        if wanted is not None:
+            missing = wanted - {int(s["index"]) for s in segs}
+            if missing:
+                raise KeyError(f"沒有第 {min(missing)} 段")
+        changed = 0
+        for s in segs:
+            if wanted is not None and int(s["index"]) not in wanted:
+                continue
+            cur = jobmod.is_kept(s)
+            new = (not cur) if invert else bool(keep)
+            if cur != new:
+                changed += 1
+            s["keep"] = new
+        if changed:
+            jobmod.save_segments(job_id, segs)
+    if changed:
+        patch: dict = {"assemble_status": "pending", "final_path": None}
+        if job.get("restore_status") != "running":
+            patch["phase"] = "review"
+            if job.get("restore_status") == "done" and any(jobmod.needs_restore(s) for s in segs):
+                patch["restore_status"] = "pending"
+        jobmod.update_job(job_id, **patch)
+        kept = sum(1 for s in segs if jobmod.is_kept(s))
+        jobmod.append_log(job_id, f"保留／捨去變更 {changed} 段，目前保留 {kept}/{len(segs)} 段")
+    return {"changed": changed, "kept_count": sum(1 for s in segs if jobmod.is_kept(s))}
 
 
 def clear_restore_outputs(job_id: str) -> int:

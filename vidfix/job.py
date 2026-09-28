@@ -40,6 +40,24 @@ def methods_for_segment(seg: dict | None, params: dict | None = None) -> list[st
     return ms or ["codeformer"]
 
 
+def is_kept(seg: dict | None) -> bool:
+    """Output keep flag. Missing (older jobs) means keep."""
+    return (seg or {}).get("keep", True) is not False
+
+
+def needs_restore(seg: dict | None) -> bool:
+    """Kept restore-tagged segment without a finished output."""
+    s = seg or {}
+    return s.get("tag") == "restore" and s.get("status") != "done" and is_kept(s)
+
+
+def kept_frames(segs: list[dict[str, Any]], fps: float) -> int:
+    """Frames the output will contain (same tessellation as assemble)."""
+    return sum(
+        ffmpeg_util.clip_frame_count(float(s["t0"]), float(s["t1"]), fps) for s in segs if is_kept(s)
+    )
+
+
 DEFAULT_PARAMS = {
     "fidelity": 0.40,
     "visibility": 0.60,
@@ -243,6 +261,7 @@ def serialize_segments(job_id: str, segs: list[dict[str, Any]] | None = None) ->
                 "duration": round(t1 - t0, 3),
                 "t0_tc": fmt_timecode(t0),
                 "t1_tc": fmt_timecode(t1),
+                "keep": is_kept(s),
                 "has_thumb": thumb.is_file(),
                 "has_out": outp.is_file(),
             }
@@ -427,8 +446,16 @@ def public_job(job: dict[str, Any], segs: list[dict[str, Any]] | None = None) ->
                 cover = int(s["index"])
                 break
     jid = job["job_id"]
+    kept = [s for s in segs if is_kept(s)]
+    try:
+        fps = float(job.get("fps") or 0)
+    except (TypeError, ValueError):
+        fps = 0.0
+    kept_duration = round(kept_frames(segs, fps) / fps, 3) if fps > 0 else None
     return {
         **job,
+        "kept_count": len(kept),
+        "kept_duration": kept_duration,
         "restore_selected": len(restore),
         "restore_done": sum(1 for s in restore if s.get("status") == "done"),
         "restore_failed": sum(1 for s in restore if s.get("status") == "failed"),

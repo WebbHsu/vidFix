@@ -73,6 +73,7 @@ Creating a job for a source that already has a job with segments **reuses** that
 ```
 index, t0, t1          seconds, millisecond decimals (not frame numbers)
 tag                    skip | restore     default skip
+keep                   bool, default true; missing (older jobs) = keep. Independent of tag.
 status                 pending | done | failed
 methods                list, e.g. ["deblock","codeformer"]
 method                 joined string for older readers, e.g. "deblock+codeformer"
@@ -119,6 +120,8 @@ Allowed restore method ids: `codeformer`, `deblock`, `deblur`, `denoise`.
 | GET | `/api/jobs` | list |
 | GET | `/api/jobs/{id}` | job + packed segments |
 | PATCH | `/api/jobs/{id}/segments/{i}` | tag skip/restore; optional methods |
+| PATCH | `/api/jobs/{id}/segments/{i}/keep` | `{keep: bool}` |
+| POST | `/api/jobs/{id}/keep` | `{action: keep\|drop\|invert, indices?}`; no indices = all segments |
 | POST | `/api/jobs/{id}/params` | fidelity, visibility, methods, strengths |
 | POST | `/api/jobs/{id}/analyze` \| `restore` \| `assemble` \| `stop` | |
 | POST | `/api/jobs/{id}/clear-restore` | delete selected restore outputs |
@@ -126,6 +129,8 @@ Allowed restore method ids: `codeformer`, `deblock`, `deblur`, `denoise`.
 | GET | `/api/jobs/{id}/segments/{i}/media` | lazy preview mp4 |
 | GET | `/api/jobs/{id}/final` | download `final.mkv` |
 | GET | `/api/jobs/{id}/log` | last 100 log lines |
+
+`GET /api/jobs/{id}` also returns `kept_count` and `kept_duration` (frame-grid seconds). Serialized segments always carry an explicit `keep`.
 
 UI polls `GET /api/jobs/{id}`. `get_job` always returns `serialize_segments` (includes `has_thumb`, timecodes). Do not assume the client will call `/segments` separately.
 
@@ -145,12 +150,13 @@ No face detection in this phase.
 
 - Space / click plays `previews/NNNN.mp4` generated from the **source** with `-ss t0 -t dur` (not hybrid seek; previews are not used for concat).
 - F = restore, S = skip. Tagging restore snapshots current `restore_methods` onto the segment.
+- D = keep/drop toggle (also card button, timeline right-click, bulk keep-all / drop-all / invert). `worker.set_keep` writes `segments.jsonl` via `save_segments` (tmp + `os.replace`) under the job lock, never touches `out/`, and resets `assemble_status`/`final_path` when something changed. Blocked only while assemble runs.
 - Changing a done restore clip’s methods, or skip→restore, deletes that `out/` file and sets `pending`.
 - Restore→skip deletes processed outputs (`out_kind` in restore/deblock/deblur/denoise).
 
 ### Restore
 
-Queue: `tag==restore` and `status != done`.
+Queue: `job.needs_restore(seg)` = `tag==restore`, `status != done`, and kept. A segment dropped while restore is running is skipped when its turn comes.
 
 Per clip, `methods_for_segment` (segment methods, else job params, else `["codeformer"]`).
 
@@ -185,12 +191,20 @@ Tiny face (`_face_w < tiny_face_px`): fidelity raised toward 0.50–0.55, visibi
 
 ### Assemble
 
-For every segment:
+For every **kept** segment (`job.is_kept`; none kept → Chinese error, also rejected up front by `worker.start_assemble`):
 
 - restore tag: use existing `out/NNNN.mkv`
 - skip tag: `encode_skip_clip` unless `out_kind==skip_v2` already exists
 
-Then `concat_and_mux`: concat demuxer with per-file `duration`, `+genpts`, then mux source audio `-c:a copy`. Output `work/<id>/final.mkv`.
+Then, if every segment is kept, `concat_and_mux` (unchanged): concat demuxer with per-file `duration`, `+genpts`, then mux source audio `-c:a copy`. Output `work/<id>/final.mkv`.
+
+If any segment is dropped (`assemble._assemble_kept`):
+
+1. `audio_runs` merges adjacent kept segments into runs on the same frame grid as `clip_frame_count` (`start = round(t0*fps)/fps`, `dur = frames/fps`).
+2. `ffmpeg_util.extract_audio_wav` (`video_start` / `audio_rate` come from `probe()`) cuts each run from the source to `audio_cut/NNNN.wav` (temp `NNNN.partial.wav`): coarse `-ss` before `-i`, `-copyts`, `atrim=start=<video_start + start>` on the source pts clock, then `apad`+`atrim=end_sample` to exactly `round(dur*sample_rate)` samples. PCM s16.
+3. `concat_and_mux_cut`: video concat list as before (durations + genpts, `-c:v copy`), second concat input of the WAVs (PCM concat is sample-exact), audio encoded AAC (96 kb/s per channel, max 512k). `audio_cut/` is deleted afterwards.
+
+Why not copy audio here: stream copy can only cut on codec frames (AAC 1024 samples ≈ 21 ms), so every join would drift or click. Why not `atrim`+`concat` in one filter graph from the source: `asplit` into N branches buffers decoded audio for later branches in RAM (hours of PCM on an 80-minute film).
 
 Skip clips must share the same H.264 profile (720p-class, yuv420p, same fps/timebase). Do not `-c:v copy` skip slices from the source (keyframe-inaccurate cuts caused ~2s gaps).
 

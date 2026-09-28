@@ -24,11 +24,7 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
         raise FileNotFoundError(f"找不到原片：{src}")
 
     segs = jobmod.load_segments(job_id)
-    queue = [
-        s
-        for s in segs
-        if s.get("tag") == "restore" and s.get("status") != "done"
-    ]
+    queue = [s for s in segs if jobmod.needs_restore(s)]
     if not queue:
         jobmod.update_job(
             job_id,
@@ -76,6 +72,10 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
             if stop_check():
                 raise Stopped()
             idx = int(seg["index"])
+            fresh = next((s for s in jobmod.load_segments(job_id) if int(s["index"]) == idx), None)
+            if fresh is not None and not jobmod.is_kept(fresh):
+                jobmod.append_log(job_id, f"段 {idx:04d} 已捨去，略過修復")
+                continue
             methods = jobmod.methods_for_segment(seg, params)
             names = {"codeformer": "修臉", "deblock": "去塊", "deblur": "去糊", "denoise": "降噪"}
             label = "+".join(names[m] for m in methods if m in names) or "修臉"
@@ -116,8 +116,10 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
                 jobmod.append_log(job_id, f"段 {idx:04d} 失敗：{e}")
 
         segs = jobmod.load_segments(job_id)
-        pending = [s for s in segs if s.get("tag") == "restore" and s.get("status") != "done"]
-        failed = [s for s in segs if s.get("tag") == "restore" and s.get("status") == "failed"]
+        pending = [s for s in segs if jobmod.needs_restore(s)]
+        failed = [
+            s for s in segs if s.get("tag") == "restore" and s.get("status") == "failed" and jobmod.is_kept(s)
+        ]
         if pending:
             jobmod.update_job(
                 job_id,

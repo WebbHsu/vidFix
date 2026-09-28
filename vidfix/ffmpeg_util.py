@@ -105,6 +105,8 @@ def probe(path: str | Path) -> dict[str, Any]:
         "audio_codec": (a or {}).get("codec_name") or "",
         "has_audio": a is not None,
         "nb_frames": _parse_int(v.get("nb_frames")),
+        "video_start": _parse_float(v.get("start_time")) or 0.0,
+        "audio_rate": _parse_int((a or {}).get("sample_rate")),
     }
 
 
@@ -492,6 +494,162 @@ def concat_and_mux(
     ]
     if has_audio:
         args += ["-i", str(source), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "copy"]
+    else:
+        args += ["-map", "0:v:0", "-c:v", "copy"]
+    args += ["-avoid_negative_ts", "make_zero", "-f", "matroska", str(tmp)]
+    try:
+        run(args)
+        if not tmp.exists() or tmp.stat().st_size < 64:
+            raise FFmpegError("成品為空")
+        tmp.replace(dest)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def extract_audio_wav(
+    source: str | Path, start: float, dur: float, dest: Path, sample_rate: int
+) -> None:
+    """Sample-accurate PCM slice of the first audio stream (for kept-segment assemble).
+
+    ``start`` is an absolute source timestamp (same clock as the video stream's
+    pts). -copyts keeps that clock; atrim cuts the start inside a codec frame,
+    and the length is forced to exactly round(dur * sample_rate) samples so the
+    summed slices never drift from the summed video frames. Coarse -ss before
+    -i only skips decoding up to a preroll.
+    """
+    ffmpeg = which_ffmpeg()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Real extension on the temp name so the wav muxer is not guessed from ".partial".
+    tmp = dest.with_name(f"{dest.stem}.partial.wav")
+    if tmp.exists():
+        tmp.unlink()
+    start = float(start)
+    nsamples = max(1, int(round(float(dur) * int(sample_rate))))
+    coarse = max(0.0, start - 2.5)
+    before = ["-ss", f"{coarse:.6f}"] if coarse > 1e-4 else []
+    args = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        *before,
+        "-copyts",
+        "-i",
+        str(source),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-af",
+        f"atrim=start={start:.6f},asetpts=PTS-STARTPTS,"
+        f"apad=whole_len={nsamples},atrim=end_sample={nsamples}",
+        "-c:a",
+        "pcm_s16le",
+        "-rf64",
+        "auto",
+        "-f",
+        "wav",
+        str(tmp),
+    ]
+    try:
+        run(args, timeout=max(120.0, float(dur) * 2 + 60))
+        if not tmp.exists() or tmp.stat().st_size < 44:
+            raise FFmpegError("音訊切片為空")
+        tmp.replace(dest)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def audio_channels(path: str | Path) -> int:
+    proc = run(
+        [
+            which_ffprobe(),
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=channels",
+            "-of",
+            "default=nw=1:nk=1",
+            str(path),
+        ]
+    )
+    return _parse_int((proc.stdout or "").strip().splitlines()[0] if proc.stdout else None) or 2
+
+
+def concat_and_mux_cut(
+    clips: list[tuple[Path, float]],
+    audio_parts: list[Path],
+    dest: Path,
+    list_path: Path,
+    audio_list_path: Path,
+) -> None:
+    """Concat kept video clips and kept PCM audio slices, audio re-encoded to AAC.
+
+    Used only when some segments are dropped. Video keeps the concat-duration +
+    genpts path; audio slices are PCM so their concat is sample-exact.
+    """
+    ffmpeg = which_ffmpeg()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".partial")
+    if tmp.exists():
+        tmp.unlink()
+
+    def _q(p: Path) -> str:
+        return p.resolve().as_posix().replace("'", "'\\''")
+
+    lines = []
+    for p, dur in clips:
+        lines.append(f"file '{_q(p)}'")
+        lines.append(f"duration {float(dur):.6f}")
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    args = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+    ]
+    if audio_parts:
+        audio_list_path.write_text(
+            "".join(f"file '{_q(p)}'\n" for p in audio_parts), encoding="utf-8"
+        )
+        ch = audio_channels(audio_parts[0])
+        bitrate = f"{min(96 * max(ch, 1), 512)}k"
+        args += [
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(audio_list_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            bitrate,
+        ]
     else:
         args += ["-map", "0:v:0", "-c:v", "copy"]
     args += ["-avoid_negative_ts", "make_zero", "-f", "matroska", str(tmp)]

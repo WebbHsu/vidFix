@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 from typing import Callable
@@ -14,6 +15,9 @@ class Stopped(Exception):
     pass
 
 
+NO_KEPT_MSG = "沒有保留任何段，無法輸出。請至少保留一段（D 切換保留／捨去）。"
+
+
 def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
     stop_check = stop_check or (lambda: jobmod.should_stop(job_id))
     job = jobmod.load_job(job_id)
@@ -21,13 +25,15 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
     if not src.is_file():
         raise FileNotFoundError(f"找不到原片：{src}")
 
-    segs = jobmod.load_segments(job_id)
-    if not segs:
+    all_segs = jobmod.load_segments(job_id)
+    if not all_segs:
         raise RuntimeError("尚未分析，沒有分段。")
+    segs = [s for s in all_segs if jobmod.is_kept(s)]
+    if not segs:
+        raise RuntimeError(NO_KEPT_MSG)
+    all_kept = len(segs) == len(all_segs)
 
-    missing_restore = [
-        s for s in segs if s.get("tag") == "restore" and s.get("status") != "done"
-    ]
+    missing_restore = [s for s in segs if jobmod.needs_restore(s)]
     if missing_restore:
         ids = ", ".join(f"{int(s['index']):04d}" for s in missing_restore[:12])
         raise RuntimeError(f"還有未完成的修復段：{ids}")
@@ -44,7 +50,10 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
             "total": len(segs),
         },
     )
-    jobmod.append_log(job_id, "輸出開始")
+    jobmod.append_log(
+        job_id,
+        "輸出開始" if all_kept else f"輸出開始（保留 {len(segs)}/{len(all_segs)} 段）",
+    )
     started = time.time()
 
     try:
@@ -95,15 +104,18 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
             raise Stopped()
 
         final_path = job_dir(job_id) / "final.mkv"
-        jobmod.set_progress(job_id, message="接回完整影片並 mux 原音訊", current=len(segs), total=len(segs))
         list_path = job_dir(job_id) / "concat.txt"
-        ffmpeg_util.concat_and_mux(
-            clips,
-            src,
-            final_path,
-            bool(job.get("has_audio")),
-            list_path,
-        )
+        if all_kept:
+            jobmod.set_progress(job_id, message="接回完整影片並 mux 原音訊", current=len(segs), total=len(segs))
+            ffmpeg_util.concat_and_mux(
+                clips,
+                src,
+                final_path,
+                bool(job.get("has_audio")),
+                list_path,
+            )
+        else:
+            _assemble_kept(job_id, job, src, segs, clips, final_path, list_path, stop_check)
         jobmod.update_job(
             job_id,
             phase="done",
@@ -129,6 +141,62 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
         )
         jobmod.append_log(job_id, f"輸出失敗：{e}")
         raise
+
+
+def audio_runs(segs: list[dict], fps: float) -> list[tuple[float, float]]:
+    """(start, duration) in seconds for each run of adjacent kept segments.
+
+    Boundaries are the same frame grid as clip_frame_count, so each run's audio
+    length equals the summed video length of its clips.
+    """
+    runs: list[list[int]] = []
+    for s in segs:
+        i0 = int(round(float(s["t0"]) * fps))
+        i1 = i0 + ffmpeg_util.clip_frame_count(float(s["t0"]), float(s["t1"]), fps)
+        if runs and runs[-1][1] == i0:
+            runs[-1][1] = i1
+        else:
+            runs.append([i0, i1])
+    return [(a / fps, (b - a) / fps) for a, b in runs]
+
+
+def _assemble_kept(job_id, job, src: Path, segs, clips, final_path: Path, list_path: Path, stop_check) -> None:
+    """Dropped segments present: cut source audio to the kept runs, then concat + AAC."""
+    fps = float(job["fps"])
+    audio_dir = job_dir(job_id) / "audio_cut"
+    parts: list[Path] = []
+    try:
+        if job.get("has_audio"):
+            # Segment times count from the first video frame; audio is cut on the source pts clock.
+            info = ffmpeg_util.probe(src)
+            v0 = float(info.get("video_start") or 0.0)
+            rate = int(info.get("audio_rate") or 48000)
+            runs = audio_runs(segs, fps)
+            if audio_dir.exists():
+                shutil.rmtree(audio_dir, ignore_errors=True)
+            for ri, (start, dur) in enumerate(runs):
+                if stop_check():
+                    raise Stopped()
+                jobmod.set_progress(
+                    job_id,
+                    message=f"切音訊 {ri + 1}/{len(runs)}",
+                    current=len(segs),
+                    total=len(segs),
+                )
+                dest = audio_dir / f"{ri:04d}.wav"
+                ffmpeg_util.extract_audio_wav(src, v0 + start, dur, dest, rate)
+                parts.append(dest)
+        if stop_check():
+            raise Stopped()
+        jobmod.set_progress(
+            job_id, message="接回保留段並編碼音訊（AAC）", current=len(segs), total=len(segs)
+        )
+        ffmpeg_util.concat_and_mux_cut(
+            clips, parts, final_path, list_path, job_dir(job_id) / "concat_audio.txt"
+        )
+    finally:
+        if audio_dir.exists():
+            shutil.rmtree(audio_dir, ignore_errors=True)
 
 
 def _eta(started: float, done: int, total: int) -> float | None:

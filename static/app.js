@@ -207,7 +207,27 @@ function pad4(n) {
 
 function fingerprint(segs) {
   const list = Array.isArray(segs) ? segs : [];
-  return list.map((s) => `${s.index}:${s.tag}:${s.status}:${s.has_thumb ? 1 : 0}`).join("|");
+  return list
+    .map((s) => `${s.index}:${s.tag}:${s.status}:${s.has_thumb ? 1 : 0}:${isKept(s) ? 1 : 0}`)
+    .join("|");
+}
+
+function isKept(s) {
+  return !!s && s.keep !== false;
+}
+
+function keptStats() {
+  const fps = (state.job && Number(state.job.fps)) || 0;
+  let n = 0;
+  let frames = 0;
+  let sec = 0;
+  for (const s of state.segs) {
+    if (!isKept(s)) continue;
+    n += 1;
+    if (fps > 0) frames += Math.max(1, Math.round(s.t1 * fps) - Math.round(s.t0 * fps));
+    else sec += s.duration;
+  }
+  return { n, duration: fps > 0 ? frames / fps : sec };
 }
 
 function applySegments(raw, force) {
@@ -226,7 +246,7 @@ function applySegments(raw, force) {
   renderRestoreList();
   renderSegInfo();
   const noSeg = !segments.length;
-  for (const id of ["btnTagRestore", "btnTagSkip", "btnPreview"]) {
+  for (const id of ["btnTagRestore", "btnTagSkip", "btnPreview", "btnKeep", "btnKeepAll", "btnDropAll", "btnKeepInvert"]) {
     const b = $(id);
     if (b) b.disabled = noSeg;
   }
@@ -252,10 +272,11 @@ function renderTimeline() {
   el.innerHTML = "";
   for (const s of state.segs) {
     const d = document.createElement("div");
-    d.className = `tl-seg ${s.tag}${s.index === state.selected ? " on" : ""}`;
+    const kept = isKept(s);
+    d.className = `tl-seg ${s.tag}${kept ? "" : " dropped"}${s.index === state.selected ? " on" : ""}`;
     d.dataset.index = String(s.index);
     d.style.flex = `${Math.max(s.duration, 0.2)} 0 0`;
-    d.title = `#${pad4(s.index)} ${s.t0_tc}–${s.t1_tc} ${s.tag}`;
+    d.title = `#${pad4(s.index)} ${s.t0_tc}–${s.t1_tc} ${s.tag} · ${kept ? "保留" : "捨去"}（右鍵切換）`;
     el.appendChild(d);
   }
 }
@@ -278,7 +299,8 @@ function renderGrid() {
   const frag = document.createDocumentFragment();
   for (const s of state.segs) {
     const card = document.createElement("div");
-    card.className = `card ${s.tag}${s.index === state.selected ? " on" : ""}`;
+    const kept = isKept(s);
+    card.className = `card ${s.tag}${kept ? "" : " dropped"}${s.index === state.selected ? " on" : ""}`;
     card.dataset.index = String(s.index);
     if (s.has_thumb) {
       const img = document.createElement("img");
@@ -301,6 +323,12 @@ function renderGrid() {
     }
     cap.innerHTML = `<b>#${pad4(s.index)}</b><span>${s.t0_tc} · ${tag}</span>`;
     card.appendChild(cap);
+    const kb = document.createElement("button");
+    kb.type = "button";
+    kb.className = `keep-btn${kept ? "" : " off"}`;
+    kb.textContent = kept ? "保留" : "捨去";
+    kb.title = "點一下切換保留／捨去（D）";
+    card.appendChild(kb);
     frag.appendChild(card);
   }
   el.appendChild(frag);
@@ -319,7 +347,11 @@ function renderRestoreList() {
     const li = document.createElement("li");
     if (s.index === state.selected) li.classList.add("on");
     const kind = methodShort(s);
-    const st = s.status === "done" ? "已完成" : s.status === "failed" ? "失敗" : "佇列中";
+    let st = s.status === "done" ? "已完成" : s.status === "failed" ? "失敗" : "佇列中";
+    if (!isKept(s)) {
+      li.classList.add("dropped");
+      st = s.status === "done" ? "已完成（已捨去）" : "已捨去，不修";
+    }
     li.innerHTML = `<div>#${String(s.index).padStart(4, "0")}　${kind}　${st}</div>
       <div class="tc">${s.t0_tc} – ${s.t1_tc}</div>`;
     li.onclick = () => selectSeg(s.index, false);
@@ -333,14 +365,77 @@ function currentSeg() {
 
 function renderSegInfo() {
   const s = currentSeg();
+  renderKeepSummary();
   if (!s) {
     $("segInfo").textContent = "尚未選段";
+    $("btnKeep").textContent = "捨去 (D)";
     return;
   }
   const methodLabel = s.tag === "restore" ? methodShort(s) : "跳過";
+  const kept = isKept(s);
   $("segInfo").innerHTML =
     `<b>第 ${s.index} 段</b><br>${s.t0_tc} → ${s.t1_tc}（${s.duration.toFixed(2)} 秒）<br>` +
-    `標籤：${methodLabel}　狀態：${s.status}`;
+    `標籤：${methodLabel}　狀態：${s.status}<br>成品：${kept ? "保留" : "<span class=\"bad-text\">捨去</span>"}`;
+  $("btnKeep").textContent = kept ? "捨去 (D)" : "保留 (D)";
+}
+
+function renderKeepSummary() {
+  const el = $("keepSummary");
+  if (!el) return;
+  if (!state.segs.length) {
+    el.textContent = "";
+    el.classList.remove("warn");
+    return;
+  }
+  const { n, duration } = keptStats();
+  const total = state.job ? jobmodFmt(state.job.duration) : "";
+  if (!n) {
+    el.textContent = `保留 0/${state.segs.length} 段：沒有保留任何段，無法輸出`;
+  } else {
+    el.textContent =
+      `保留 ${n}/${state.segs.length} 段　成品長度 ${jobmodFmt(duration)}` +
+      (n < state.segs.length && total ? `（原片 ${total}）` : "");
+  }
+  el.classList.toggle("warn", !n);
+}
+
+async function setKeep(index, keep) {
+  if (!state.jobId || index == null) return;
+  try {
+    await api(`/api/jobs/${state.jobId}/segments/${index}/keep`, {
+      method: "PATCH",
+      body: JSON.stringify({ keep }),
+    });
+    await refreshSegments(true);
+    await refreshJob();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+function toggleKeep(index) {
+  const s = state.segs.find((x) => x.index === index);
+  if (!s) return;
+  setKeep(index, !isKept(s));
+}
+
+async function bulkKeep(action) {
+  if (!state.jobId || !state.segs.length) return;
+  const mixed = state.segs.some((s) => isKept(s)) && state.segs.some((s) => !isKept(s));
+  if (mixed && action !== "invert") {
+    const label = action === "keep" ? "全部保留" : "全部捨去";
+    if (!confirm(`${label}？目前的保留／捨去選擇會被覆蓋。`)) return;
+  }
+  try {
+    await api(`/api/jobs/${state.jobId}/keep`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    await refreshSegments(true);
+    await refreshJob();
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 function selectSeg(index, play) {
@@ -482,15 +577,23 @@ async function postAction(path) {
 
 $("btnAnalyze").onclick = () => postAction(`/api/jobs/${state.jobId}/analyze`);
 $("btnRestore").onclick = () => {
-  const n = state.segs.filter((s) => s.tag === "restore").length;
-  if (!n) {
+  const tagged = state.segs.filter((s) => s.tag === "restore");
+  if (!tagged.length) {
     alert("尚未選取任何修復段（預設全部跳過）。請先用 F 標 3–4 段。");
+    return;
+  }
+  if (!tagged.some((s) => isKept(s))) {
+    alert("已選的修復段都被捨去了，捨去的段不會修復。請先用 D 改回保留。");
     return;
   }
   postAction(`/api/jobs/${state.jobId}/restore`);
 };
 $("btnAssemble").onclick = () => {
-  const pending = state.segs.filter((s) => s.tag === "restore" && s.status !== "done");
+  if (!state.segs.some((s) => isKept(s))) {
+    alert("沒有保留任何段，無法輸出。請至少保留一段（D 切換保留／捨去）。");
+    return;
+  }
+  const pending = state.segs.filter((s) => s.tag === "restore" && s.status !== "done" && isKept(s));
   if (pending.length) {
     alert(`還有 ${pending.length} 段修復未完成，請先開始修復或改回跳過。`);
     return;
@@ -506,6 +609,13 @@ $("btnClear").onclick = async () => {
 
 $("btnTagRestore").onclick = () => setTag("restore");
 $("btnTagSkip").onclick = () => setTag("skip");
+$("btnKeep").onclick = () => {
+  const s = currentSeg();
+  if (s) toggleKeep(s.index);
+};
+$("btnKeepAll").onclick = () => bulkKeep("keep");
+$("btnDropAll").onclick = () => bulkKeep("drop");
+$("btnKeepInvert").onclick = () => bulkKeep("invert");
 $("btnPreview").onclick = () => {
   const s = currentSeg();
   if (!s) {
@@ -518,12 +628,22 @@ $("btnPreview").onclick = () => {
 $("grid").addEventListener("click", (ev) => {
   const card = ev.target.closest("[data-index]");
   if (!card) return;
+  if (ev.target.closest(".keep-btn")) {
+    toggleKeep(Number(card.dataset.index));
+    return;
+  }
   selectSeg(Number(card.dataset.index), false);
 });
 $("timeline").addEventListener("click", (ev) => {
   const bit = ev.target.closest("[data-index]");
   if (!bit) return;
   selectSeg(Number(bit.dataset.index), false);
+});
+$("timeline").addEventListener("contextmenu", (ev) => {
+  const bit = ev.target.closest("[data-index]");
+  if (!bit) return;
+  ev.preventDefault();
+  toggleKeep(Number(bit.dataset.index));
 });
 
 let paramTimer = null;
@@ -604,6 +724,11 @@ window.addEventListener("keydown", (ev) => {
   } else if (ev.key === "s" || ev.key === "S") {
     ev.preventDefault();
     setTag("skip");
+  } else if (ev.key === "d" || ev.key === "D") {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    ev.preventDefault();
+    const s = currentSeg();
+    if (s) toggleKeep(s.index);
   } else if (ev.key === " ") {
     ev.preventDefault();
     const p = $("player");

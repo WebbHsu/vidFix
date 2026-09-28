@@ -314,6 +314,7 @@ def _plan_and_write_segments(job_id: str, job: dict[str, Any]) -> None:
                 "t0": a,
                 "t1": b,
                 "tag": "skip",
+                "keep": True,
                 "status": "pending",
                 "thumb": f"thumbs/{i:04d}.jpg",
                 "out": f"out/{i:04d}.mkv",

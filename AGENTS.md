@@ -31,7 +31,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 - Torch is installed separately (CUDA wheel, not in `requirements.txt`).
 - ffmpeg / ffprobe must be on `PATH`.
 - Weights: `weights/CodeFormer/codeformer.pth`, `weights/insightface/models/buffalo_l/*.onnx`.
-- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=17`, css `v=14`). Ask the user to Ctrl+F5.
+- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=18`, css `v=15`). Ask the user to Ctrl+F5.
 
 ## Where to edit
 
@@ -65,7 +65,7 @@ Do not add CAS. Do not use `deblock` `block=4`. Unsharp must stay luma-only and 
 
 - Thumbnail temp files must be `0000.partial.jpg`, not `0000.jpg.partial` (ffmpeg needs a real image extension). Muxer: `image2`.
 - Hybrid seek: coarse `-ss` before `-i`, fine `-ss` after. Frame counts from `clip_frame_count` so adjacent clips tessellate. Skip clips are re-encoded (`out_kind=skip_v2`), not stream-copied.
-- Concat uses listed durations + `+genpts`. Audio is muxed once from the source with `-c:a copy`.
+- Concat uses listed durations + `+genpts`. Audio is muxed once from the source with `-c:a copy` when every segment is kept. When segments are dropped (keep=false), audio is cut per kept run to PCM with the same frame-grid boundaries and encoded AAC once (`assemble._assemble_kept`).
 - Face paste: 512 warp + inscribed-ellipse mask + `cv2.seamlessClone`. A rectangular mask shows a box around the face. A tiny ellipse looks weak.
 - CodeFormer clips are two-pass: detect landmarks, Savitzky–Golay-smooth rigid affine (~0.45s), then restore with smoothed `M`. Do not replace this with causal EMA as the primary tracker.
 - Thumb grid CSS: `grid-auto-rows: max-content` and `img` `min-height: 88px`. `overflow:hidden` + a squeezed row height makes thumbs look like lines.

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>vidFix</title>
-  <link rel="stylesheet" href="/static/app.css?v=14" />
+  <link rel="stylesheet" href="/static/app.css?v=15" />
 </head>
 <body>
   <header class="top">
@@ -86,7 +86,7 @@
         <ul id="restoreItems"></ul>
       </aside>
       <div class="stage">
-        <div id="timeline" class="timeline" title="時間軸：灰=跳過，橙=修復"></div>
+        <div id="timeline" class="timeline" title="時間軸：灰=跳過，橙=修復，暗色斜紋=捨去（不進成品）。右鍵點一段可切換保留／捨去"></div>
         <div class="player-row">
           <div class="player-wrap">
             <video id="player" controls playsinline muted></video>
@@ -98,8 +98,17 @@
               <button type="button" id="btnPreview">預覽此段 (Space)</button>
               <button type="button" id="btnTagRestore" class="primary">修復 (F)</button>
               <button type="button" id="btnTagSkip">跳過 (S)</button>
+              <button type="button" id="btnKeep">捨去 (D)</button>
             </div>
-            <p class="keys">點縮圖選段，F 修復、S 跳過、Space 預覽、← → 切段</p>
+            <div class="keep-box">
+              <div id="keepSummary" class="keep-summary"></div>
+              <div class="keep-bulk">
+                <button type="button" id="btnKeepAll">全部保留</button>
+                <button type="button" id="btnDropAll">全部捨去</button>
+                <button type="button" id="btnKeepInvert">反選</button>
+              </div>
+            </div>
+            <p class="keys">點縮圖選段，F 修復、S 跳過、D 保留／捨去、Space 預覽、← → 切段。捨去的段不會修復，也不會進成品。</p>
           </div>
         </div>
         <div class="grid-panel">
@@ -111,6 +120,6 @@
     <pre id="log" class="log"></pre>
   </section>
 
-  <script src="/static/app.js?v=17"></script>
+  <script src="/static/app.js?v=18"></script>
 </body>
 </html>

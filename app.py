@@ -40,6 +40,15 @@ class TagBody(BaseModel):
     methods: list[str] | None = None
 
 
+class KeepBody(BaseModel):
+    keep: bool
+
+
+class KeepBulkBody(BaseModel):
+    action: str
+    indices: list[int] | None = None
+
+
 class ParamsBody(BaseModel):
     fidelity: float | None = Field(default=None, ge=0, le=1)
     visibility: float | None = Field(default=None, ge=0, le=1)
@@ -193,6 +202,44 @@ def patch_segment(job_id: str, index: int, body: TagBody) -> dict[str, Any]:
     except (KeyError, ValueError) as e:
         raise _err(400, str(e)) from e
     return seg
+
+
+@app.patch("/api/jobs/{job_id}/segments/{index}/keep")
+def patch_segment_keep(job_id: str, index: int, body: KeepBody) -> dict[str, Any]:
+    try:
+        res = worker.set_keep(job_id, [index], keep=body.keep)
+        seg = next(s for s in jobmod.load_segments(job_id) if int(s["index"]) == int(index))
+    except RuntimeError as e:
+        raise _err(409, str(e)) from e
+    except FileNotFoundError as e:
+        raise _err(404, str(e)) from e
+    except KeyError as e:
+        raise _err(400, str(e.args[0]) if e.args else str(e)) from e
+    except ValueError as e:
+        raise _err(400, str(e)) from e
+    return {**seg, "keep": jobmod.is_kept(seg), "kept_count": res["kept_count"]}
+
+
+@app.post("/api/jobs/{job_id}/keep")
+def bulk_keep(job_id: str, body: KeepBulkBody) -> dict[str, Any]:
+    """action: keep | drop | invert; indices omitted means every segment."""
+    if body.action not in ("keep", "drop", "invert"):
+        raise _err(400, "action 只能是 keep、drop 或 invert")
+    try:
+        return worker.set_keep(
+            job_id,
+            body.indices,
+            keep=None if body.action == "invert" else body.action == "keep",
+            invert=body.action == "invert",
+        )
+    except RuntimeError as e:
+        raise _err(409, str(e)) from e
+    except FileNotFoundError as e:
+        raise _err(404, str(e)) from e
+    except KeyError as e:
+        raise _err(400, str(e.args[0]) if e.args else str(e)) from e
+    except ValueError as e:
+        raise _err(400, str(e)) from e
 
 
 @app.post("/api/jobs/{job_id}/params")
