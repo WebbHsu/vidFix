@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download CodeFormer + InsightFace detection weights for offline use."""
+"""Download CodeFormer + InsightFace + Real-ESRGAN weights for offline use."""
 
 from __future__ import annotations
 
@@ -11,12 +11,16 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from vidfix.models.realesrgan import WEIGHT_URLS, weight_path  # noqa: E402
 from vidfix.paths import CODEFORMER_WEIGHTS, INSIGHTFACE_ROOT, ensure_dirs  # noqa: E402
 
 CODEFORMER_URL = "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth"
 BUFFALO_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 
 UA = "vidFix-weight-downloader"
+
+# Default Real-ESRGAN set (general-x4v3 + wdn for denoise DNI).
+REALESRGAN_NAMES = ("realesr-general-x4v3", "realesr-general-wdn-x4v3")
 
 
 def download(url: str, dest: Path) -> None:
@@ -68,7 +72,25 @@ def main() -> int:
         except OSError:
             pass
 
-    print("\n完成。CodeFormer 權重授權為 S-Lab License 1.0（非商業研究用途請自行確認）。")
+    for name in REALESRGAN_NAMES:
+        dest = weight_path(name)
+        url = WEIGHT_URLS[name]
+        if dest.is_file() and dest.stat().st_size > 1_000_000:
+            print(f"已有 Real-ESRGAN {name}：{dest}")
+        else:
+            download(url, dest)
+            print(f"已存 {dest}")
+    # Optional heavier x2 RRDB model (not downloaded by default).
+    x2 = weight_path("RealESRGAN_x2plus")
+    if x2.is_file():
+        print(f"已有可選 RealESRGAN_x2plus：{x2}")
+    else:
+        print(
+            "（可選）RealESRGAN_x2plus 未下載；預設使用 realesr-general-x4v3。"
+            f" 需要時可手動下載：{WEIGHT_URLS['RealESRGAN_x2plus']}"
+        )
+
+    print("\n完成。CodeFormer 權重授權為 S-Lab License 1.0；Real-ESRGAN 權重為 BSD-3-Clause。")
     return 0
 
 

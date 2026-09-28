@@ -14,7 +14,7 @@ from . import ffmpeg_util
 from .paths import WORK_DIR, job_dir
 
 JOB_ID_RE = re.compile(r"^[0-9A-Za-z_-]{4,64}$")
-RESTORE_METHODS = ("codeformer", "deblock", "deblur", "denoise")
+RESTORE_METHODS = ("codeformer", "deblock", "deblur", "denoise", "realesrgan")
 
 
 def normalize_methods(raw) -> list[str]:
@@ -78,6 +78,9 @@ DEFAULT_PARAMS = {
     "restore_methods": ["codeformer"],
     "deblock_strength": "medium",
     "denoise_strength": "medium",
+    "realesrgan_model": "realesr-general-x4v3",
+    "realesrgan_strength": "medium",
+    "realesrgan_tile": 512,
 }
 
 _locks: dict[str, threading.RLock] = {}

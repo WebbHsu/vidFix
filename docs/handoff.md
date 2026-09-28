@@ -13,8 +13,9 @@ Working today:
 - Create/reuse job, analyze (PySceneDetect or 25s fallback), resumable thumbs, Traditional Chinese UI.
 - Tag F/S, preview from source, restore whitelist, stop/resume from disk.
 - CodeFormer + InsightFace (largest face), fidelity 0.40, visibility 0.60, no upscale.
-- Combinable restore methods: deblock, denoise, deblur, codeformer.
-- Independent **deblock/deblur strength** vs **denoise strength** (mild/medium/strong).
+- Combinable restore methods: deblock, denoise, deblur, realesrgan, codeformer.
+- Independent **deblock/deblur strength** vs **denoise strength** vs **realesrgan strength** (mild/medium/strong).
+- Real-ESRGAN: enhance-at-original-resolution (upscale then INTER_AREA down). Default model `realesr-general-x4v3`.
 - Assemble: skip clips re-encoded `skip_v2`, concat durations + genpts, original audio copy.
 - Offline face-track smoothing (two-pass, Savitzky–Golay when scipy is installed).
 - Ellipse + Poisson paste (no square “face box” if mask is left as-is).
@@ -66,16 +67,25 @@ User asked, in order:
 4. Confirm deblock/deblur/denoise are CPU (yes, libavfilter).
 5. Independent denoise strength vs other filter strength.
 
-Order is fixed: **deblock → denoise → deblur → codeformer**.
+Order is fixed: **deblock → denoise → deblur → realesrgan → codeformer**.
 
-When CodeFormer is on, filters are `extra_vf` on the decode pipe (`restore.py` + `ffmpeg_util.decode_process`). Do not filter-encode then decode again for CF.
+When CodeFormer or Real-ESRGAN is on, filters are `extra_vf` on the decode pipe (`restore.py` + `ffmpeg_util.decode_process`). Do not filter-encode then decode again.
 
-GPU lock (`worker._busy_gpu`) only if any queued clip’s methods include `codeformer`. Filter-only clips can run without it.
+GPU lock (`worker._busy_gpu`) if any queued clip’s methods include `codeformer` or `realesrgan`. Filter-only clips can run without it.
+
+### Real-ESRGAN (2026-09-28)
+
+User asked for RealScaler-class enhancement on restore-tagged clips only, without changing
+output resolution. Implemented as method `realesrgan` (BSD-3 Real-ESRGAN, not RealScaler code).
+Default `realesr-general-x4v3` (compact, real-world, denoise DNI). Strength = blend + DNI.
+Verified on box (CPU): tile≈full (max abs 5), 720p ~6 s/frame x4v3 / ~16 s x2plus, assemble
+keeps 1280×720 / 250 frames / sequential frame bar / joins intact with skip segments.
 
 ### Rejected ideas
 
 - **美肌 / skin smoothing** as a compression fix: overlaps denoise, removes remaining grain that hides blocks, plastic skin vs blocked background makes compression *more* obvious. After CodeFormer it undoes restored texture. Do not add it unless the user wants a separate beauty look, and do not sell it as deblock.
-- ComfyUI batch, full-film PNG dump, auto face-based preselect, 2×/4×, RIFE.
+- ComfyUI batch, full-film PNG dump, auto face-based preselect, 2×/4× **output**, RIFE.
+- Copying RealScaler source (no declared license). Implement against Real-ESRGAN (BSD-3) only.
 
 ## What to do when the user asks to “make it look better”
 
@@ -90,13 +100,13 @@ GPU lock (`worker._busy_gpu`) only if any queued clip’s methods include `codef
 ## Open / known gaps
 
 - `scipy` is not in `requirements.txt`. `stabilize.smooth_affine_track` tries `savgol_filter` and silently falls back to interpolation. Adding scipy to the venv is a reasonable hardening step.
-- README still describes restore as “only CodeFormer” in places; UI has four methods. Keep README in sync if you touch user-facing docs.
+- README / UI copy: five methods including Real-ESRGAN. Keep in sync if you touch user-facing docs.
 - `params.deblock` (bool) is a leftover. CF decode still applies weak deblock when `extra_vf` is empty. Easy to confuse with the deblock **method**.
 - FaceRestorer still has causal landmark EMA + restored-face EMA for the `M is None` path. The production CF path always passes `M`. Do not delete EMA without checking that fallback.
 - No automated tests except `python -m vidfix.plan`. There is no pytest suite.
 - Preview MP4 uses simple `-ss` before `-i` (not hybrid). Fine for watching; do not use previews as assemble sources.
 - Changing strengths/methods never auto-rebuilds outputs (spec). Users forget this constantly — remind them.
-- Static cache: bump `app.js?v=` / `app.css?v=` in `index.html` on every frontend change (js is `v=18`, css `v=15` as of this file).
+- Static cache: bump `app.js?v=` / `app.css?v=` in `index.html` on every frontend change (js is `v=19`, css `v=16` as of this file).
 - Keep/drop: only the dropped-segments assemble path re-encodes audio. Do not “simplify” it to `-c:a copy` + cut (AAC frame granularity drifts at each join) or to a single `asplit`/`atrim`/`concat` graph (RAM on long films). The temp name must stay `NNNN.partial.wav` (real extension, same lesson as thumbs).
 - Seen while testing keep/drop (not changed): the all-kept copy path puts the source AAC’s first packet at the video start and loses the ~21 ms encoder-delay offset, so audio is ~21 ms late (under one frame). And the hybrid seek can start a skip clip one frame late when `t0 - 2.5` falls between frames (it showed up on a video-only 25 fps test file with segment starts at whole seconds), probably because `setpts=PTS-STARTPTS` resets to the first frame after the coarse seek, not to the coarse time. Both affect the old path too; not touched here. The last segment’s `t1` is the container duration, which can be one frame past the last video frame.
 - `torch` version on this machine has been CUDA 12.x (cu124 / cu128). Do not `pip install torch` from PyPI CPU wheels into `.venv`.
@@ -105,9 +115,10 @@ GPU lock (`worker._busy_gpu`) only if any queued clip’s methods include `codef
 
 - Tune filter coefficients in `ffmpeg_util.compression_core` (keep independent denoise vs deblock strengths).
 - Optional scipy in requirements + import error message.
-- README/UI copy for the four methods and two strength dropdowns.
+- README/UI copy for the five methods and three strength dropdowns.
 - Do **not** add 美肌 unless explicitly requested as a beauty look.
-- Do **not** add a second GPU restorer without a GPU-budget discussion (12GB, one clip, one frame).
+- Real-ESRGAN is the approved second GPU path (same-res enhance). Do not add a third GPU restorer without another GPU-budget discussion (12GB, one clip, one frame).
+- Prefer retuning `realesrgan_strength` / `realesrgan_tile` over swapping to heavier RRDB models by default.
 
 ## How to run a change
 

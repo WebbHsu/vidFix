@@ -36,6 +36,7 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
 
     params = job["params"]
     need_cf = any("codeformer" in jobmod.methods_for_segment(s, params) for s in queue)
+    need_re = any("realesrgan" in jobmod.methods_for_segment(s, params) for s in queue)
     jobmod.update_job(
         job_id,
         phase="restore",
@@ -52,6 +53,7 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
     jobmod.append_log(job_id, f"修復開始，佇列 {len(queue)} 段")
 
     restorer = None
+    enhancer = None
     try:
         if need_cf:
             try:
@@ -67,6 +69,8 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
                 visibility=float(params.get("visibility") or 0.60),
                 tiny_face_px=int(params.get("tiny_face_px") or 75),
             )
+        if need_re:
+            enhancer = _make_enhancer(params)
         started = time.time()
         for qi, seg in enumerate(queue):
             if stop_check():
@@ -77,7 +81,13 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
                 jobmod.append_log(job_id, f"段 {idx:04d} 已捨去，略過修復")
                 continue
             methods = jobmod.methods_for_segment(seg, params)
-            names = {"codeformer": "修臉", "deblock": "去塊", "deblur": "去糊", "denoise": "降噪"}
+            names = {
+                "codeformer": "修臉",
+                "deblock": "去塊",
+                "deblur": "去糊",
+                "denoise": "降噪",
+                "realesrgan": "AI強化",
+            }
             label = "+".join(names[m] for m in methods if m in names) or "修臉"
             jobmod.set_progress(
                 job_id,
@@ -88,13 +98,36 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
                 eta_sec=_eta(started, qi, len(queue)),
             )
             try:
-                if "codeformer" in methods:
-                    extra = ffmpeg_util.compression_core(
-                        str(params.get("deblock_strength") or "medium"),
-                        [m for m in methods if m in ("deblock", "deblur", "denoise")],
-                        denoise_strength=str(params.get("denoise_strength") or "medium"),
+                use_cf = "codeformer" in methods
+                use_re = "realesrgan" in methods
+                filter_kinds = [m for m in methods if m in ("deblock", "deblur", "denoise")]
+                extra = ffmpeg_util.compression_core(
+                    str(params.get("deblock_strength") or "medium"),
+                    filter_kinds,
+                    denoise_strength=str(params.get("denoise_strength") or "medium"),
+                )
+                if use_cf:
+                    if use_re and enhancer is None:
+                        enhancer = _make_enhancer(params)
+                    _restore_one(
+                        job_id,
+                        job,
+                        src,
+                        seg,
+                        restorer,
+                        stop_check,
+                        extra_vf=extra,
+                        enhancer=enhancer if use_re else None,
                     )
-                    _restore_one(job_id, job, src, seg, restorer, stop_check, extra_vf=extra)
+                    jobmod.update_segment(
+                        job_id, idx, status="done", out_kind="restore", methods=methods, error=None
+                    )
+                elif use_re:
+                    if enhancer is None:
+                        enhancer = _make_enhancer(params)
+                    _restore_enhance_one(
+                        job_id, job, src, seg, enhancer, stop_check, extra_vf=extra
+                    )
                     jobmod.update_segment(
                         job_id, idx, status="done", out_kind="restore", methods=methods, error=None
                     )
@@ -156,6 +189,28 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
     finally:
         if restorer is not None:
             restorer.close()
+        if enhancer is not None:
+            enhancer.close()
+
+
+def _make_enhancer(params: dict):
+    try:
+        from .models.realesrgan import FrameEnhancer, missing_weights_message, weights_present
+    except ModuleNotFoundError as e:
+        if "torch" in str(e):
+            raise RuntimeError(
+                "尚未安裝 PyTorch。請關掉目前的 vidFix，改用 run.bat 啟動（會使用專案裡的 .venv）。"
+            ) from e
+        raise
+    model = str(params.get("realesrgan_model") or "realesr-general-x4v3")
+    if not weights_present(model):
+        raise FileNotFoundError(missing_weights_message(model))
+    tile = params.get("realesrgan_tile")
+    return FrameEnhancer(
+        model=model,
+        strength=str(params.get("realesrgan_strength") or "medium"),
+        tile=512 if tile is None else int(tile),
+    )
 
 
 def _restore_deblock_one(job_id, job, src: Path, seg, stop_check: StopCheck, methods=None) -> None:
@@ -180,7 +235,84 @@ def _restore_deblock_one(job_id, job, src: Path, seg, stop_check: StopCheck, met
     )
 
 
-def _restore_one(job_id, job, src: Path, seg, restorer, stop_check: StopCheck, extra_vf: str | None = None) -> None:
+def _restore_enhance_one(job_id, job, src: Path, seg, enhancer, stop_check: StopCheck, extra_vf=None) -> None:
+    """Decode → optional ffmpeg filters → Real-ESRGAN (same res) → encode. No CodeFormer."""
+    idx = int(seg["index"])
+    dest = jobmod.segment_out_path(job_id, idx)
+    tmp = dest.with_name(dest.name + ".partial")
+    if tmp.exists():
+        tmp.unlink()
+    if dest.exists():
+        dest.unlink()
+
+    width = int(job["width"])
+    height = int(job["height"])
+    fps = float(job["fps"])
+    t0 = float(seg["t0"])
+    t1 = float(seg["t1"])
+    params = job["params"]
+    deblock = bool(params.get("deblock", True))
+    crf = int(params.get("crf_restore") or 16)
+    preset = str(params.get("preset_restore") or "fast")
+    expected = ffmpeg_util.clip_frame_count(t0, t1, fps)
+
+    try:
+        enc = ffmpeg_util.encode_process(tmp, width, height, fps, crf, preset)
+        n = 0
+        last = None
+        last_progress = time.time()
+        try:
+            assert enc.stdin is not None
+            for i, frame in enumerate(
+                _iter_frames(src, t0, t1, width, height, fps, deblock, expected, stop_check, extra_vf=extra_vf)
+            ):
+                out = enhancer.enhance(frame)
+                last = out.tobytes()
+                enc.stdin.write(last)
+                n += 1
+                now = time.time()
+                if now - last_progress >= 1.0:
+                    last_progress = now
+                    jobmod.set_progress(
+                        job_id,
+                        message=f"AI強化 {idx:04d}  幀 {n}/{expected}",
+                        current=n,
+                        total=expected,
+                        segment_index=idx,
+                    )
+            while n < expected and last is not None:
+                enc.stdin.write(last)
+                n += 1
+            enc.stdin.close()
+            enc_rc = enc.wait(timeout=120)
+            if enc_rc != 0:
+                err = (enc.stderr.read() if enc.stderr else b"").decode("utf-8", "replace")[-1500:]
+                raise RuntimeError(f"編碼失敗：{err}")
+        except Exception:
+            _kill(enc)
+            raise
+        finally:
+            if enc.stderr:
+                enc.stderr.close()
+
+        if n == 0:
+            raise RuntimeError("沒有解出任何影格")
+        if not tmp.exists() or tmp.stat().st_size < 64:
+            raise RuntimeError("修復輸出為空")
+        tmp.replace(dest)
+    except Stopped:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def _restore_one(
+    job_id, job, src: Path, seg, restorer, stop_check: StopCheck, extra_vf: str | None = None, enhancer=None
+) -> None:
     reset = getattr(restorer, "reset", None)
     if callable(reset):
         reset()
@@ -216,6 +348,8 @@ def _restore_one(job_id, job, src: Path, seg, restorer, stop_check: StopCheck, e
         for i, frame in enumerate(
             _iter_frames(src, t0, t1, width, height, fps, deblock, expected, stop_check, extra_vf=extra_vf)
         ):
+            # Detect on filtered (pre-enhance) frames — landmarks match the warp used later
+            # after enhance, which preserves geometry at the same resolution.
             kps_list.append(restorer.detect_kps(frame))
             if i == 0 or (i + 1) % 20 == 0 or i + 1 == expected:
                 jobmod.set_progress(
@@ -238,6 +372,8 @@ def _restore_one(job_id, job, src: Path, seg, restorer, stop_check: StopCheck, e
             for i, frame in enumerate(
                 _iter_frames(src, t0, t1, width, height, fps, deblock, expected, stop_check, extra_vf=extra_vf)
             ):
+                if enhancer is not None:
+                    frame = enhancer.enhance(frame)
                 M = poses[i] if i < len(poses) else None
                 out = restorer.restore_frame(frame, M=M)
                 last = out.tobytes()

@@ -11,7 +11,7 @@ run.bat
       → else uvicorn FastAPI, open http://127.0.0.1:8765
 ```
 
-One process. Background work is daemon threads in `vidfix/worker.py`. Only one job thread at a time. A process-wide `_busy_gpu` lock is taken only when the restore queue includes CodeFormer.
+One process. Background work is daemon threads in `vidfix/worker.py`. Only one job thread at a time. A process-wide `_busy_gpu` lock is taken when the restore queue includes CodeFormer or Real-ESRGAN.
 
 On startup (`app` lifespan): `ensure_dirs()`, then `job.recover_jobs_on_startup()`:
 
@@ -41,7 +41,8 @@ vidfix/
     codeformer.py      network + VQGAN
     vqgan.py
     restorer.py        InsightFace detect, CodeFormer, ellipse paste
-weights/               CodeFormer + buffalo_l (gitignored in practice)
+    realesrgan.py      SRVGGNetCompact / RRDBNet, FrameEnhancer (tile + blend)
+weights/               CodeFormer + buffalo_l + RealESRGAN (gitignored in practice)
 work/<job_id>/         all durable state
 ```
 
@@ -104,17 +105,20 @@ so neighbouring clips tessellate with no 1-frame hole/overlap.
 | restore_method | `"codeformer"` | joined form, kept in sync |
 | deblock_strength | medium | deblock + deblur (+ companion hqdn3d) |
 | denoise_strength | medium | denoise method only |
+| realesrgan_model | realesr-general-x4v3 | or RealESRGAN_x2plus |
+| realesrgan_strength | medium | blend + DNI denoise (mild/medium/strong) |
+| realesrgan_tile | 512 | input tile size; 0 = whole frame (VRAM!) |
 | crf_skip / preset_skip | 18 / veryfast | assemble skip clips |
 | crf_restore / preset_restore | 16 / fast | restored clips |
 | kps_smooth, face_smooth, hold_miss | 0.42, 0.70, 2 | still on FaceRestorer; two-pass path passes `M` so landmark EMA is secondary |
 
-Allowed restore method ids: `codeformer`, `deblock`, `deblur`, `denoise`.
+Allowed restore method ids: `codeformer`, `deblock`, `deblur`, `denoise`, `realesrgan`.
 
 ## HTTP (all local)
 
 | Method | Path | |
 |---|---|---|
-| GET | `/api/health` | ffmpeg, torch, cuda, weights, scenedetect, running job |
+| GET | `/api/health` | ffmpeg, torch, cuda, codeformer/insightface/realesrgan weights, scenedetect, running job |
 | POST | `/api/browse` | tkinter file dialog (needs a desktop session) |
 | POST | `/api/jobs` | create or reuse |
 | GET | `/api/jobs` | list |
@@ -160,16 +164,20 @@ Queue: `job.needs_restore(seg)` = `tag==restore`, `status != done`, and kept. A 
 
 Per clip, `methods_for_segment` (segment methods, else job params, else `["codeformer"]`).
 
-**If `codeformer` in methods**
+**If `codeformer` in methods** (optional `realesrgan` before CF)
 
-1. Pass 1: decode frames (`decode_process` raw BGR pipe), `detect_kps` (largest InsightFace face).
+1. Pass 1: decode frames (`decode_process` raw BGR pipe + `extra_vf`), `detect_kps` (largest InsightFace face) on the filtered frames.
 2. `smooth_affine_track` on the whole clip (scale, rotation, tx, ty). Savitzky–Golay if scipy is present; otherwise interpolated track.
-3. Pass 2: decode again with the same `extra_vf`, `restore_frame(..., M=smoothed)`.
+3. Pass 2: decode again with the same `extra_vf`; if `realesrgan` is selected, `FrameEnhancer.enhance` each frame (same HxW); then `restore_frame(..., M=smoothed)`.
 4. Encode H.264 mkv via `encode_process` stdin pipe. Last frame padded if decode ran short.
 
 `extra_vf = compression_core(deblock_strength, filter_kinds, denoise_strength)`. If that is empty, decode may still apply original weak `deblock=filter=weak:block=8` when `params.deblock` is true.
 
-**If no CodeFormer**
+**If `realesrgan` without CodeFormer**
+
+Single decode pipe with `extra_vf` → `FrameEnhancer.enhance` per frame → encode. Same resolution as source.
+
+**If neither CodeFormer nor Real-ESRGAN**
 
 `encode_deblock_clip` — whole-frame ffmpeg filters only, one encode.
 
@@ -184,6 +192,25 @@ Filter chain (`compression_core`), CPU:
 | deblur | luma-only `unsharp=5:5:…:5:5:0.0` (chroma gain 0) |
 
 Never CAS. Never `block=4`.
+
+### Real-ESRGAN (`vidfix/models/realesrgan.py`)
+
+Default model **`realesr-general-x4v3`** (SRVGGNetCompact, ~1.2M params, ~5 MB weights):
+built for real-world content, compact enough to share a 12 GB card with CodeFormer, and
+supports denoise DNI with the companion `realesr-general-wdn-x4v3.pth`. Alternative:
+`RealESRGAN_x2plus` (RRDBNet, heavier; set `params.realesrgan_model`).
+
+Per frame: BGR → RGB float → network (x4 or x2) → `cv2.INTER_AREA` back to original HxW →
+blend with the input by `realesrgan_strength` (mild 0.45 / medium 0.75 / strong 1.0). For
+x4v3, the same strength also drives DNI denoise (0.35 / 0.55 / 0.75).
+
+Tiling: default `realesrgan_tile=512` with `tile_pad=10` on the **input**. CUDA uses fp16;
+CPU fp32. Expected VRAM on RTX 4070 12GB, 720p, one frame, fp16 (excl. CUDA context):
+x4v3 tile 512 ≈ 0.3 GB peak tensors; with CodeFormer also resident ≈ 3–4 GB total.
+x2plus full-frame 720p ≈ ~2 GB tensors — keep tiling on. Missing weights raise a Chinese
+`FileNotFoundError` only when a clip actually needs the method.
+
+Order: **deblock → denoise → deblur → realesrgan → codeformer**.
 
 Face paste (`restorer._paste_face`): warp 512 restored face with inverse affine, inscribed-ellipse mask (corners of the 512 square stay zero), Poisson `seamlessClone`, then visibility mix.
 
@@ -219,9 +246,9 @@ Then `-frames:v N` with tessellating `N`. Used by skip encode, deblock encode, a
 
 ## Frontend notes
 
-- Method checkboxes: `mCodeformer`, `mDeblock`, `mDeblur`, `mDenoise`.
-- `deblockRow` visible if deblock or deblur checked. `denoiseRow` visible only if denoise checked.
-- `onParam` POSTs fidelity, visibility, restore_methods, deblock_strength, denoise_strength (debounced 300ms).
+- Method checkboxes: `mCodeformer`, `mDeblock`, `mDeblur`, `mDenoise`, `mRealesrgan`.
+- `deblockRow` visible if deblock or deblur checked. `denoiseRow` / `realesrganRow` visible only if their method is checked.
+- `onParam` POSTs fidelity, visibility, restore_methods, deblock_strength, denoise_strength, realesrgan_strength (debounced 300ms).
 - Thumb cards must not `appendChild` an undefined `img` when `has_thumb` is false (use placeholder).
 - Grid must not be `grid-auto-rows: 1fr` inside a short `overflow:hidden` pane.
 

@@ -72,7 +72,10 @@ def start_restore(job_id: str) -> None:
     params = job.get("params") or {}
     need_gpu = any(
         jobmod.needs_restore(s)
-        and "codeformer" in jobmod.methods_for_segment(s, params)
+        and (
+            "codeformer" in jobmod.methods_for_segment(s, params)
+            or "realesrgan" in jobmod.methods_for_segment(s, params)
+        )
         for s in jobmod.load_segments(job_id)
     )
 
@@ -115,6 +118,7 @@ def set_tag(job_id: str, index: int, tag: str, method: str | None = None) -> dic
 
     fields: dict = {"tag": tag}
     outp = jobmod.segment_out_path(job_id, index)
+    # Real-ESRGAN (with or without CodeFormer) outputs are out_kind "restore".
     processed = ("restore", "deblock", "deblur", "denoise")
     if tag == "skip":
         if outp.is_file() and seg.get("out_kind") in processed:
@@ -256,6 +260,9 @@ def update_params(job_id: str, patch: dict) -> dict:
         "restore_methods": lambda v: jobmod.normalize_methods(v) or ["codeformer"],
         "deblock_strength": lambda v: v if v in ("mild", "medium", "strong") else "medium",
         "denoise_strength": lambda v: v if v in ("mild", "medium", "strong") else "medium",
+        "realesrgan_model": lambda v: v if v in ("realesr-general-x4v3", "RealESRGAN_x2plus") else "realesr-general-x4v3",
+        "realesrgan_strength": lambda v: v if v in ("mild", "medium", "strong") else "medium",
+        "realesrgan_tile": lambda v: 0 if int(v) <= 0 else max(64, int(v)),
     }
     for k, conv in allowed.items():
         if k in patch and patch[k] is not None:

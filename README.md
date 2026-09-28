@@ -6,7 +6,7 @@
 
 ## 原則
 
-- 分析後每一段預設都是「跳過」，只有手動標成「修復」的段才跑 CodeFormer。
+- 分析後每一段預設都是「跳過」，只有手動標成「修復」的段才跑修復方法（去塊／降噪／去糊／AI 強化／CodeFormer，可複選）。
 - 分析階段不做臉部偵測；只切場景、抽縮圖、可預覽原片。
 - 進度只寫在 `work/<job_id>/`，不靠 RAM／瀏覽器／GPU 狀態。
 - 不要把整部 80 分鐘解成圖片；不要用 ComfyUI 當批次引擎。
@@ -38,8 +38,12 @@ python scripts/download_weights.py
 
 - `weights/CodeFormer/codeformer.pth`
 - `weights/insightface/models/buffalo_l/*.onnx`
+- `weights/RealESRGAN/realesr-general-x4v3.pth`（預設 AI 強化）
+- `weights/RealESRGAN/realesr-general-wdn-x4v3.pth`（選用，控制降噪強度）
+- （選用）`weights/RealESRGAN/RealESRGAN_x2plus.pth`
 
-沒有權重仍可**分析、預覽、標籤**；按「開始修復」才會載入模型。
+沒有權重仍可**分析、預覽、標籤**；按「開始修復」且該段勾了需要的方法才會載入模型。
+缺少 Real-ESRGAN 權重時，只有勾了「AI 強化」的段會報錯（繁中提示執行 `download_weights.py`）。
 
 InsightFace 偵測預設走 CPU 版 `onnxruntime`（夠用）。若要 GPU 偵測可再裝 `onnxruntime-gpu`。
 
@@ -62,9 +66,12 @@ InsightFace 偵測預設走 CPU 版 `onnxruntime`（夠用）。若要 GPU 偵�
 
 ## 參數
 
+- **修復方式（可複選）**：去方塊、降噪、去壓縮模糊、AI 強化 (Real-ESRGAN)、CodeFormer 修臉。
+  順序固定：去塊 → 降噪 → 去糊 → AI 強化 → 修臉。
 - **CodeFormer fidelity** 預設 `0.40`（建議 0.30–0.55）。較低較「修」、較高較保真。
 - **貼回 visibility** 預設 `0.60`（建議 0.50–0.70）。
-- 解析度維持原片，不升解析度、不做 2×／4× 超分。
+- **去塊／去糊強度**、**降噪強度**、**AI 強化強度**各自 mild/medium/strong。
+- **解析度維持原片**。AI 強化會用 Real-ESRGAN 先升解析再縮回原尺寸（成品解析度不變；這是使用者核准的例外，不是輸出 2×／4×）。
 - 臉太小（寬邊小於約 75px）仍修，但提高保真、降低生成感。
 - 改參數**不會**自動作廢舊輸出。要重跑已選段請按「清除修復結果並重跑已選段」。
 
@@ -89,6 +96,8 @@ work/<job_id>/
 
 一次只修**一段、一幀**。RTX 4070 12GB 跑 720p 單人短段足夠。不要同時開第二個修復任務。
 
+Real-ESRGAN（預設 `realesr-general-x4v3`、fp16、tile 512）本身大約幾百 MB；與 CodeFormer 同時常駐約 3–4 GB，遠低於 12 GB。較重的 `RealESRGAN_x2plus` 請保持 tiling。
+
 ## 明確不做
 
 解馬賽克、換臉、Deepfake、自動預選重點鏡頭、SeedVR2 / RIFE 補幀、整段載入記憶體、雲端 API。
@@ -106,4 +115,4 @@ work/<job_id>/
 
 ## 授權
 
-應用程式碼供本機使用。CodeFormer 權重為 [S-Lab License 1.0](https://github.com/sczhou/CodeFormer/blob/master/LICENSE)；使用前請自行確認授權是否符合你的用途。
+應用程式碼供本機使用。CodeFormer 權重為 [S-Lab License 1.0](https://github.com/sczhou/CodeFormer/blob/master/LICENSE)；Real-ESRGAN 權重／架構為 [BSD-3-Clause](https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE)。使用前請自行確認授權是否符合你的用途。

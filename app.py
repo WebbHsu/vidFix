@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from vidfix import ffmpeg_util, job as jobmod, worker
-from vidfix.paths import STATIC_DIR, CODEFORMER_WEIGHTS, INSIGHTFACE_ROOT, ensure_dirs
+from vidfix.paths import STATIC_DIR, CODEFORMER_WEIGHTS, INSIGHTFACE_ROOT, REALESRGAN_DIR, ensure_dirs
 
 
 @asynccontextmanager
@@ -58,6 +58,9 @@ class ParamsBody(BaseModel):
     restore_methods: list[str] | None = None
     deblock_strength: str | None = None
     denoise_strength: str | None = None
+    realesrgan_model: str | None = None
+    realesrgan_strength: str | None = None
+    realesrgan_tile: int | None = Field(default=None, ge=0, le=4096)
 
 
 def _err(status: int, message: str) -> HTTPException:
@@ -114,6 +117,7 @@ def health() -> dict[str, Any]:
         "scenedetect": scenedetect_ok,
         "codeformer": CODEFORMER_WEIGHTS.is_file(),
         "insightface": det_dir.is_dir() and any(det_dir.glob("*.onnx")),
+        "realesrgan": (REALESRGAN_DIR / "realesr-general-x4v3.pth").is_file(),
         "running_job": worker.running_job_id(),
     }
 

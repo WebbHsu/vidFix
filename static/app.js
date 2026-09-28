@@ -49,6 +49,7 @@ async function refreshHealth() {
       ["CUDA", h.cuda],
       ["CodeFormer", h.codeformer],
       ["InsightFace", h.insightface],
+      ["RealESRGAN", h.realesrgan],
     ];
     $("health").innerHTML = pills
       .map(([n, ok]) => `<span class="pill ${ok ? "ok" : "bad"}">${n} ${ok ? "✓" : "✕"}</span>`)
@@ -156,8 +157,10 @@ async function refreshJob() {
   $("mDeblock").checked = methods.includes("deblock");
   $("mDeblur").checked = methods.includes("deblur");
   $("mDenoise").checked = methods.includes("denoise");
+  $("mRealesrgan").checked = methods.includes("realesrgan");
   $("deblockStrength").value = job.params.deblock_strength || "medium";
   $("denoiseStrength").value = job.params.denoise_strength || "medium";
+  $("realesrganStrength").value = job.params.realesrgan_strength || "medium";
   syncMethodUi();
 
   const pg = job.progress || {};
@@ -661,6 +664,7 @@ function onParam() {
         restore_methods: selectedMethods(),
         deblock_strength: $("deblockStrength").value,
         denoise_strength: $("denoiseStrength").value,
+        realesrgan_strength: $("realesrganStrength").value,
       }),
     });
   }, 300);
@@ -671,6 +675,7 @@ function selectedMethods() {
   if ($("mDeblock") && $("mDeblock").checked) m.push("deblock");
   if ($("mDeblur") && $("mDeblur").checked) m.push("deblur");
   if ($("mDenoise") && $("mDenoise").checked) m.push("denoise");
+  if ($("mRealesrgan") && $("mRealesrgan").checked) m.push("realesrgan");
   return m;
 }
 
@@ -678,7 +683,7 @@ function methodShort(s) {
   const ms = Array.isArray(s.methods)
     ? s.methods
     : String(s.method || "codeformer").split("+").filter(Boolean);
-  const names = { codeformer: "修臉", deblock: "去塊", deblur: "去糊", denoise: "降噪" };
+  const names = { codeformer: "修臉", deblock: "去塊", deblur: "去糊", denoise: "降噪", realesrgan: "AI強化" };
   return ms.map((x) => names[x] || x).join("+") || "修臉";
 }
 
@@ -687,10 +692,12 @@ function syncMethodUi() {
   const cf = ms.includes("codeformer");
   const blockish = ms.includes("deblock") || ms.includes("deblur");
   const denoise = ms.includes("denoise");
+  const re = ms.includes("realesrgan");
   $("fidelityRow").classList.toggle("hidden", !cf);
   $("visibilityRow").classList.toggle("hidden", !cf);
   $("deblockRow").classList.toggle("hidden", !blockish);
   $("denoiseRow").classList.toggle("hidden", !denoise);
+  $("realesrganRow").classList.toggle("hidden", !re);
 }
 
 $("fidelity").oninput = onParam;
@@ -711,8 +718,13 @@ $("mDenoise").onchange = () => {
   syncMethodUi();
   onParam();
 };
+$("mRealesrgan").onchange = () => {
+  syncMethodUi();
+  onParam();
+};
 $("deblockStrength").onchange = onParam;
 $("denoiseStrength").onchange = onParam;
+$("realesrganStrength").onchange = onParam;
 
 window.addEventListener("keydown", (ev) => {
   const t = ev.target;

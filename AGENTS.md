@@ -17,7 +17,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 - Do not dump an 80-minute video to PNG/JPG frames.
 - Do not use ComfyUI, cloud APIs, SeedVR2, RIFE, demosaic, face-swap, or Deepfake.
 - Do not auto-select restore clips from face size / presence.
-- Do not upscale (no 2×/4×). Keep source resolution.
+- Do not upscale the **output** (no 2×/4× export). Keep source resolution. Exception (user-approved): Real-ESRGAN may temporarily upscale a restore-tagged frame then downscale back to the original size — the finished clip stays at source resolution.
 - Do not run a second restore job at the same time (VRAM).
 - Do not restart a vidFix / uvicorn process the user killed. Tell them to run `run.bat`.
 - Do not bind a second server if `8765` is already in use. `app.py:main()` already opens the existing URL and returns.
@@ -30,8 +30,8 @@ You are continuing a local Windows Python app for **selective face restoration o
 - Start with `run.bat`, never `python app.py` from 3.14.
 - Torch is installed separately (CUDA wheel, not in `requirements.txt`).
 - ffmpeg / ffprobe must be on `PATH`.
-- Weights: `weights/CodeFormer/codeformer.pth`, `weights/insightface/models/buffalo_l/*.onnx`.
-- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=18`, css `v=15`). Ask the user to Ctrl+F5.
+- Weights: `weights/CodeFormer/codeformer.pth`, `weights/insightface/models/buffalo_l/*.onnx`, `weights/RealESRGAN/realesr-general-x4v3.pth` (+ optional `realesr-general-wdn-x4v3.pth` for denoise DNI).
+- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=19`, css `v=16`). Ask the user to Ctrl+F5.
 
 ## Where to edit
 
@@ -43,6 +43,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 | ffmpeg seek/encode/filters | `vidfix/ffmpeg_util.py` |
 | Restore queue, two-pass CodeFormer, extra_vf | `vidfix/restore.py` |
 | Face detect / CodeFormer / paste | `vidfix/models/restorer.py` |
+| Real-ESRGAN frame enhance | `vidfix/models/realesrgan.py` |
 | Offline affine smoothing | `vidfix/stabilize.py` |
 | Background threads, GPU lock, tags | `vidfix/worker.py` |
 | Concat + original audio | `vidfix/assemble.py` |
@@ -52,12 +53,14 @@ You are continuing a local Windows Python app for **selective face restoration o
 
 Checkboxes, combinable, applied in this order:
 
-**deblock → denoise → deblur → codeformer**
+**deblock → denoise → deblur → realesrgan → codeformer**
 
 - `deblock_strength` (mild/medium/strong): deblock + deblur (and light `hqdn3d` when deblock is on without the denoise method).
 - `denoise_strength` (mild/medium/strong): **only** the denoise method. Independent of deblock_strength.
-- Filters are CPU libavfilter. GPU lock is taken only if any queued clip includes `codeformer`.
-- If CodeFormer is also selected, filters go in `extra_vf` on decode — do not encode filters then decode again.
+- `realesrgan_strength` (mild/medium/strong): blend between original and enhanced (0.45 / 0.75 / 1.0) plus DNI denoise for x4v3.
+- Filters are CPU libavfilter. GPU lock is taken if any queued clip includes `codeformer` **or** `realesrgan`.
+- Filters always go in `extra_vf` on the decode pipe when CodeFormer or Real-ESRGAN is selected — do not encode filters then decode again.
+- Real-ESRGAN: upscale with the model, then `INTER_AREA` back to the original frame size. Output resolution never changes.
 
 Do not add CAS. Do not use `deblock` `block=4`. Unsharp must stay luma-only and modest. Skin-smoothing / 美肌 is **not** a compression fix; do not add it as one.
 
