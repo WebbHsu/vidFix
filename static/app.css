@@ -315,10 +315,9 @@ video {
 }
 .card { position: relative; }
 .card.restore { border-color: var(--restore); }
-.card.dropped { border-style: dashed; }
-.card.dropped img,
-.card.dropped .thumb-ph { opacity: 0.3; filter: grayscale(1); }
-.card.dropped .cap { opacity: 0.55; }
+/* Dropped: keep thumbnail in full colour so it stays readable; mark with a red dashed border. */
+.card.dropped { border-style: dashed; border-color: #e5534b; }
+.card.dropped .cap { opacity: 0.7; }
 .keep-btn {
   position: absolute;
   top: 4px;
