@@ -13,6 +13,8 @@ run.bat
 
 One process. Background work is daemon threads in `vidfix/worker.py`. Only one job thread at a time. A process-wide `_busy_gpu` lock is taken when the restore queue includes CodeFormer or Real-ESRGAN.
 
+Task errors: `run_*` record failures raised inside their own `try` (`*_status=failed`, `error`, progress message, log). The `_spawn` runner also catches anything that escapes (errors raised before that `try`, e.g. missing source, unfinished restore segments at assemble) and calls `worker._record_failure`: log line (not duplicated), `error`, `<step>_status=failed` (a thumbs refill never downgrades `analyze_status=done`), `phase` back to `review` (or `idle` with no segments), `progress.message`. `Stopped` is still handled inside `run_*`. `start_analyze` / `start_restore` / `start_assemble` check `job.require_source` synchronously and raise `job.SourceMissing` (HTTP 400, 「找不到原始影片：<path>，請確認檔案位置或重新指定」).
+
 On startup (`app` lifespan): `ensure_dirs()`, then `job.recover_jobs_on_startup()`:
 
 - delete any `*.partial` / `*.tmp` under `work/`
@@ -128,14 +130,15 @@ Allowed restore method ids: `codeformer`, `deblock`, `deblur`, `denoise`, `reale
 | PATCH | `/api/jobs/{id}/segments/{i}/keep` | `{keep: bool}` |
 | POST | `/api/jobs/{id}/keep` | `{action: keep\|drop\|invert, indices?}`; no indices = all segments |
 | POST | `/api/jobs/{id}/params` | fidelity, visibility, methods, strengths |
-| POST | `/api/jobs/{id}/analyze` \| `restore` \| `assemble` \| `stop` | |
+| POST | `/api/jobs/{id}/analyze` \| `restore` \| `assemble` \| `stop` | missing source = 400 before any thread starts |
+| POST | `/api/jobs/{id}/source` | `{path}`; relink a moved source (`worker.relink_source`): file exists, `.mkv`, ffprobe duration within 0.5 s, same width/height/fps, same has-audio; 409 while this job runs. Updates `source_path`/`source_name`, clears `error`, `failed` statuses → `pending`, logs. Segments/thumbs/`out/` untouched |
 | POST | `/api/jobs/{id}/clear-restore` | delete selected restore outputs |
 | GET | `/api/jobs/{id}/thumbs/{name}.jpg` | |
 | GET | `/api/jobs/{id}/segments/{i}/media` | lazy preview mp4 |
 | GET | `/api/jobs/{id}/final` | download `final.mkv` |
 | GET | `/api/jobs/{id}/log` | last 100 log lines |
 
-`GET /api/jobs/{id}` also returns `kept_count` and `kept_duration` (frame-grid seconds). Serialized segments always carry an explicit `keep`.
+`GET /api/jobs/{id}` also returns `kept_count`, `kept_duration` (frame-grid seconds) and `source_exists` / `source_missing` (the UI warns and highlights 「重新指定原始影片」). Serialized segments always carry an explicit `keep`.
 
 UI polls `GET /api/jobs/{id}`. `get_job` always returns `serialize_segments` (includes `has_thumb`, timecodes). Do not assume the client will call `/segments` separately.
 
@@ -253,6 +256,7 @@ Then `-frames:v N` with tessellating `N`. Used by skip encode, deblock encode, a
 - `onParam` POSTs fidelity, visibility, restore_methods, deblock_strength, denoise_strength, realesrgan_strength (debounced 300ms).
 - Thumb cards must not `appendChild` an undefined `img` when `has_thumb` is false (use placeholder).
 - Grid must not be `grid-auto-rows: 1fr` inside a short `overflow:hidden` pane.
+- Errors: `job.error` shows in `#errorBanner` (red) and red `#progressText`; a new background error alerts once per change (`state.lastErr`, reset by analyze/restore/assemble clicks). `#sourcePathInfo` + `#btnRelink` (browse dialog, falls back to a prompt prefilled with the old path).
 - Selection state is `state.sel` (Set of indices) + `state.anchor`; `state.selected` is the current segment. `.sel` (blue outline + ✓ badge on cards, blue bottom bar on the timeline) is separate from `.on` (current, yellow), `.restore` and `.dropped`. Selection changes toggle classes via `renderSelection()` instead of rebuilding the grid.
 
 ## Dependencies

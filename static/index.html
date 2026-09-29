@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>vidFix</title>
-  <link rel="stylesheet" href="/static/app.css?v=17" />
+  <link rel="stylesheet" href="/static/app.css?v=18" />
 </head>
 <body>
   <header class="top">
@@ -32,7 +32,13 @@
 
   <section id="workspace" class="workspace hidden">
     <div class="toolbar">
-      <div class="file-meta" id="fileMeta"></div>
+      <div class="file-info">
+        <div class="file-meta" id="fileMeta"></div>
+        <div class="source-row">
+          <span id="sourcePathInfo" class="source-path"></span>
+          <button type="button" id="btnRelink" title="原始影片搬走或 NAS 路徑變了時，指向同一支影片的新位置（縮圖、標籤、修復檔都保留）">重新指定原始影片</button>
+        </div>
+      </div>
       <div class="actions">
         <button type="button" id="btnAnalyze" class="primary">分析</button>
         <button type="button" id="btnRestore">開始修復</button>
@@ -82,6 +88,8 @@
       <span class="hint">同一段可勾多種，順序：去塊 → 降噪 → 去糊 → AI強化 → 修臉。AI強化會先升解析再縮回原解析度（成品解析度不變）。降噪／強化強度與去塊／去糊分開選。改參數不會自動作廢舊輸出。</span>
     </div>
 
+    <div id="errorBanner" class="error-banner hidden" role="alert"></div>
+
     <div class="progress-wrap">
       <div class="progress-bar"><div id="progressFill"></div></div>
       <div id="progressText" class="progress-text">尚未開始</div>
@@ -129,6 +137,6 @@
     <pre id="log" class="log"></pre>
   </section>
 
-  <script src="/static/app.js?v=20"></script>
+  <script src="/static/app.js?v=21"></script>
 </body>
 </html>

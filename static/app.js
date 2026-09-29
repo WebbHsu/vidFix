@@ -120,6 +120,7 @@ function renderJobCards(jobs) {
 
 async function loadJob(id) {
   state.jobId = id;
+  state.lastErr = undefined;
   state.segFp = "";
   state.selected = 0;
   state.sel = new Set([0]);
@@ -137,6 +138,60 @@ async function loadJob(id) {
   startPoll();
   const panel = document.querySelector(".grid-panel");
   if (panel) panel.scrollIntoView({ block: "nearest" });
+}
+
+function renderSourceAndError(job) {
+  const missing = !!job.source_missing;
+  const info = $("sourcePathInfo");
+  info.textContent = missing
+    ? `⚠ 找不到原始影片：${job.source_path || "（未設定）"}，請確認檔案位置或重新指定`
+    : `原始影片：${job.source_path || ""}`;
+  info.classList.toggle("missing", missing);
+  $("btnRelink").classList.toggle("warn", missing);
+  $("btnRelink").disabled = !!job.running;
+
+  const banner = $("errorBanner");
+  banner.textContent = job.error ? `錯誤：${job.error}（修正後可再按一次同一個按鈕重試）` : "";
+  banner.classList.toggle("hidden", !job.error);
+  // Alert once when a background task fails after the job was opened.
+  const err = job.error || null;
+  if (state.lastErr !== undefined && err && err !== state.lastErr) {
+    state.lastErr = err;
+    setTimeout(() => alert("任務失敗：" + err), 0);
+  }
+  state.lastErr = err;
+}
+
+async function relinkSource() {
+  const job = state.job;
+  if (!job) return;
+  let path = "";
+  try {
+    const r = await api("/api/browse", { method: "POST", body: "{}" });
+    path = (r && r.path) || "";
+  } catch {
+    path = "";
+  }
+  if (!path) {
+    const typed = prompt(
+      "輸入原始影片的新完整路徑（必須是同一支影片：長度、解析度、fps 相同）",
+      job.source_path || ""
+    );
+    if (typed === null) return;
+    path = typed.trim();
+  }
+  if (!path) return;
+  try {
+    await api(`/api/jobs/${state.jobId}/source`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    await refreshJob();
+    await refreshJobs();
+    alert("已更換原始影片：" + path);
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 async function refreshJob() {
@@ -179,6 +234,7 @@ async function refreshJob() {
     (job.error ? `　錯誤：${job.error}` : "");
   $("progressText").textContent = msg;
   $("progressText").classList.toggle("err", !!job.error);
+  renderSourceAndError(job);
 
   const thumbsMissing = (job.thumbs_missing || 0) > 0;
   $("btnAnalyze").disabled = running || (job.analyze_status === "done" && !thumbsMissing);
@@ -714,16 +770,18 @@ $("btnOpen").onclick = async () => {
   await loadJob(id);
 };
 
-async function postAction(path) {
+async function postAction(path, startsTask = false) {
   try {
     await api(path, { method: "POST", body: "{}" });
+    // A task that fails again with the same message should still alert.
+    if (startsTask) state.lastErr = null;
     await refreshJob();
   } catch (e) {
     alert(e.message);
   }
 }
 
-$("btnAnalyze").onclick = () => postAction(`/api/jobs/${state.jobId}/analyze`);
+$("btnAnalyze").onclick = () => postAction(`/api/jobs/${state.jobId}/analyze`, true);
 $("btnRestore").onclick = () => {
   const tagged = state.segs.filter((s) => s.tag === "restore");
   if (!tagged.length) {
@@ -734,7 +792,7 @@ $("btnRestore").onclick = () => {
     alert("已選的修復段都被捨去了，捨去的段不會修復。請先用 D 改回保留。");
     return;
   }
-  postAction(`/api/jobs/${state.jobId}/restore`);
+  postAction(`/api/jobs/${state.jobId}/restore`, true);
 };
 $("btnAssemble").onclick = () => {
   if (!state.segs.some((s) => isKept(s))) {
@@ -746,8 +804,9 @@ $("btnAssemble").onclick = () => {
     alert(`還有 ${pending.length} 段修復未完成，請先開始修復或改回跳過。`);
     return;
   }
-  postAction(`/api/jobs/${state.jobId}/assemble`);
+  postAction(`/api/jobs/${state.jobId}/assemble`, true);
 };
+$("btnRelink").onclick = () => relinkSource();
 $("btnStop").onclick = () => postAction(`/api/jobs/${state.jobId}/stop`);
 $("btnClear").onclick = async () => {
   if (!confirm("清除已選修復段的輸出並重跑？未選的段不會動。")) return;

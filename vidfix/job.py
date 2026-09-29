@@ -120,6 +120,21 @@ def validate_job_id(job_id: str) -> str:
     return job_id
 
 
+class SourceMissing(Exception):
+    """Source video path in job.json is gone (moved / NAS offline)."""
+
+
+def source_missing_message(path) -> str:
+    return f"找不到原始影片：{path}，請確認檔案位置或重新指定"
+
+
+def require_source(job: dict[str, Any]) -> Path:
+    src = str(job.get("source_path") or "")
+    if not src or not Path(src).is_file():
+        raise SourceMissing(source_missing_message(src))
+    return Path(src)
+
+
 def create_job(source_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     src = Path(source_path).expanduser().resolve()
     if not src.is_file():
@@ -455,6 +470,8 @@ def public_job(job: dict[str, Any], segs: list[dict[str, Any]] | None = None) ->
     except (TypeError, ValueError):
         fps = 0.0
     kept_duration = round(kept_frames(segs, fps) / fps, 3) if fps > 0 else None
+    src = str(job.get("source_path") or "")
+    source_ok = bool(src) and Path(src).is_file()
     return {
         **job,
         "kept_count": len(kept),
@@ -464,6 +481,7 @@ def public_job(job: dict[str, Any], segs: list[dict[str, Any]] | None = None) ->
         "restore_failed": sum(1 for s in restore if s.get("status") == "failed"),
         "thumbs_missing": thumbs_missing,
         "cover_thumb": (f"/api/jobs/{jid}/thumbs/{cover:04d}.jpg" if cover is not None else None),
-        "source_exists": Path(job.get("source_path") or "").is_file(),
+        "source_exists": source_ok,
+        "source_missing": not source_ok,
         "final_exists": bool(job.get("final_path") and Path(job["final_path"]).is_file()),
     }

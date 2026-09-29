@@ -22,7 +22,7 @@ def run_analyze(job_id: str, stop_check: StopCheck | None = None) -> None:
     job = jobmod.load_job(job_id)
     src = Path(job["source_path"])
     if not src.is_file():
-        raise FileNotFoundError(f"找不到原片：{src}")
+        raise FileNotFoundError(jobmod.source_missing_message(src))
 
     jobmod.update_job(
         job_id,
@@ -78,7 +78,7 @@ def run_thumbs_only(job_id: str, stop_check: StopCheck | None = None) -> None:
     job = jobmod.load_job(job_id)
     src = Path(job["source_path"])
     if not src.is_file():
-        raise FileNotFoundError(f"找不到原片：{src}")
+        raise FileNotFoundError(jobmod.source_missing_message(src))
     jobmod.update_job(
         job_id,
         phase="analyze",

@@ -21,7 +21,7 @@ def run_restore(job_id: str, stop_check: StopCheck | None = None) -> None:
     job = jobmod.load_job(job_id)
     src = Path(job["source_path"])
     if not src.is_file():
-        raise FileNotFoundError(f"找不到原片：{src}")
+        raise FileNotFoundError(jobmod.source_missing_message(src))
 
     segs = jobmod.load_segments(job_id)
     queue = [s for s in segs if jobmod.needs_restore(s)]

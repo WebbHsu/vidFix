@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import threading
+import traceback
+from pathlib import Path
 from typing import Callable
 
-from . import analyze, assemble, job as jobmod, restore
+from . import analyze, assemble, ffmpeg_util, job as jobmod, restore
 
 _guard = threading.Lock()
 _threads: dict[str, threading.Thread] = {}
@@ -28,6 +30,38 @@ def running_job_id() -> str | None:
     return None
 
 
+_STOPPED = (analyze.Stopped, restore.Stopped, assemble.Stopped)
+# label -> (status key, message prefix)
+_TASKS = {
+    "analyze": ("analyze_status", "分析失敗"),
+    "thumbs": ("analyze_status", "縮圖失敗"),
+    "restore": ("restore_status", "修復失敗"),
+    "assemble": ("assemble_status", "輸出失敗"),
+}
+
+
+def _record_failure(job_id: str, label: str, exc: BaseException) -> None:
+    """Persist a background task error so the UI shows it and the step can be retried.
+
+    run_* already log errors raised inside their own try; errors raised before that
+    (missing source, nothing kept, ...) only reach here.
+    """
+    key, prefix = _TASKS.get(label, ("", "任務失敗"))
+    msg = str(exc) or type(exc).__name__
+    job = jobmod.load_job(job_id)
+    if not (job.get(key) == "failed" and job.get("error") == msg):
+        jobmod.append_log(job_id, f"{prefix}：{msg}")
+    patch: dict = {
+        "error": msg,
+        "phase": "review" if int(job.get("total_segments") or 0) > 0 else "idle",
+        "progress": jobmod.empty_progress() | {"message": f"{prefix}：{msg}"},
+    }
+    # A thumbs refill failing before it started must not undo a finished analysis.
+    if key and not (label == "thumbs" and job.get(key) == "done"):
+        patch[key] = "failed"
+    jobmod.update_job(job_id, **patch)
+
+
 def _spawn(job_id: str, target: Callable[[], None], label: str) -> None:
     with _guard:
         if _is_running(job_id):
@@ -41,8 +75,14 @@ def _spawn(job_id: str, target: Callable[[], None], label: str) -> None:
         def runner():
             try:
                 target()
-            except Exception:
+            except _STOPPED:
                 pass
+            except Exception as e:
+                traceback.print_exc()
+                try:
+                    _record_failure(job_id, label, e)
+                except Exception:
+                    traceback.print_exc()
             finally:
                 jobmod.clear_stop(job_id)
 
@@ -60,8 +100,10 @@ def start_analyze(job_id: str) -> None:
         ]
         if not missing:
             raise RuntimeError("分析已完成")
+        _check_source(job_id, job)
         _spawn(job_id, lambda: analyze.run_thumbs_only(job_id), "thumbs")
         return
+    _check_source(job_id, job)
     _spawn(job_id, lambda: analyze.run_analyze(job_id), "analyze")
 
 
@@ -69,6 +111,7 @@ def start_restore(job_id: str) -> None:
     job = jobmod.load_job(job_id)
     if job.get("analyze_status") != "done":
         raise RuntimeError("請先完成分析")
+    _check_source(job_id, job)
     params = job.get("params") or {}
     need_gpu = any(
         jobmod.needs_restore(s)
@@ -95,7 +138,68 @@ def start_assemble(job_id: str) -> None:
         raise RuntimeError("請先完成分析")
     if not any(jobmod.is_kept(s) for s in jobmod.load_segments(job_id)):
         raise RuntimeError(assemble.NO_KEPT_MSG)
+    _check_source(job_id, job)
     _spawn(job_id, lambda: assemble.run_assemble(job_id), "assemble")
+
+
+def _check_source(job_id: str, job: dict) -> None:
+    try:
+        jobmod.require_source(job)
+    except jobmod.SourceMissing as e:
+        jobmod.append_log(job_id, str(e))
+        raise
+
+
+def relink_source(job_id: str, path: str, tol_sec: float = 0.5) -> dict:
+    """Point the job at a moved copy of the same video. Thumbs, segments and out/ stay."""
+    job = jobmod.load_job(job_id)
+    raw = (path or "").strip().strip('"')
+    if not raw:
+        raise ValueError("請輸入原始影片的完整路徑")
+    src = Path(raw).expanduser()
+    try:
+        src = src.resolve()
+    except OSError:
+        pass
+    if not src.is_file():
+        raise ValueError(f"找不到檔案：{src}")
+    if src.suffix.lower() != ".mkv":
+        raise ValueError("輸入必須是 .mkv")
+    try:
+        info = ffmpeg_util.probe(src)
+    except ffmpeg_util.FFmpegError as e:
+        raise ValueError(f"讀取影片失敗：{e}") from e
+    problems = []
+    dur_old, dur_new = float(job.get("duration") or 0), float(info["duration"])
+    if abs(dur_new - dur_old) > tol_sec:
+        problems.append(f"長度 {dur_new:.3f}s（任務 {dur_old:.3f}s）")
+    if (int(info["width"]), int(info["height"])) != (int(job.get("width") or 0), int(job.get("height") or 0)):
+        problems.append(f"解析度 {info['width']}×{info['height']}（任務 {job.get('width')}×{job.get('height')}）")
+    fps_old, fps_new = float(job.get("fps") or 0), float(info["fps"])
+    if abs(fps_new - fps_old) > max(0.01, fps_old * 1e-3):
+        problems.append(f"fps {fps_new:.3f}（任務 {fps_old:.3f}）")
+    if bool(info["has_audio"]) != bool(job.get("has_audio")):
+        problems.append("音軌 " + ("有" if info["has_audio"] else "無") + "（任務 " + ("有" if job.get("has_audio") else "無") + "）")
+    if problems:
+        raise ValueError("這不是同一支影片，未更換：" + "；".join(problems))
+    old = job.get("source_path")
+    with _guard:
+        if _is_running(job_id) or any(
+            job.get(k) == "running" for k in ("analyze_status", "restore_status", "assemble_status")
+        ):
+            raise RuntimeError("任務執行中無法更換原始影片，請先停止")
+        patch: dict = {
+            "source_path": str(src),
+            "source_name": src.name,
+            "error": None,
+            "progress": jobmod.empty_progress() | {"message": "已重新指定原始影片"},
+        }
+        for k in ("analyze_status", "restore_status", "assemble_status"):
+            if job.get(k) == "failed":
+                patch[k] = "pending"
+        job = jobmod.update_job(job_id, **patch)
+    jobmod.append_log(job_id, f"重新指定原始影片：{old} → {src}")
+    return job
 
 
 def stop(job_id: str) -> None:

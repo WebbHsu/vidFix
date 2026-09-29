@@ -47,6 +47,10 @@ class TagBulkBody(BaseModel):
     methods: list[str] | None = None
 
 
+class SourceBody(BaseModel):
+    path: str
+
+
 class KeepBody(BaseModel):
     keep: bool
 
@@ -283,6 +287,8 @@ def patch_params(job_id: str, body: ParamsBody) -> dict[str, Any]:
 def start_analyze(job_id: str) -> dict[str, str]:
     try:
         worker.start_analyze(job_id)
+    except jobmod.SourceMissing as e:
+        raise _err(400, str(e)) from e
     except RuntimeError as e:
         raise _err(409, str(e)) from e
     except (FileNotFoundError, ValueError) as e:
@@ -294,6 +300,8 @@ def start_analyze(job_id: str) -> dict[str, str]:
 def start_restore(job_id: str) -> dict[str, str]:
     try:
         worker.start_restore(job_id)
+    except jobmod.SourceMissing as e:
+        raise _err(400, str(e)) from e
     except RuntimeError as e:
         raise _err(409, str(e)) from e
     except (FileNotFoundError, ValueError) as e:
@@ -305,11 +313,29 @@ def start_restore(job_id: str) -> dict[str, str]:
 def start_assemble(job_id: str) -> dict[str, str]:
     try:
         worker.start_assemble(job_id)
+    except jobmod.SourceMissing as e:
+        raise _err(400, str(e)) from e
     except RuntimeError as e:
         raise _err(409, str(e)) from e
     except (FileNotFoundError, ValueError) as e:
         raise _err(404, str(e)) from e
     return {"ok": "assemble"}
+
+
+@app.post("/api/jobs/{job_id}/source")
+def relink_source(job_id: str, body: SourceBody) -> dict[str, Any]:
+    """Re-point a job at a moved copy of the same video (same duration/size/fps)."""
+    try:
+        jobmod.load_job(job_id)
+    except (FileNotFoundError, ValueError) as e:
+        raise _err(404, str(e)) from e
+    try:
+        job = worker.relink_source(job_id, body.path)
+    except RuntimeError as e:
+        raise _err(409, str(e)) from e
+    except ValueError as e:
+        raise _err(400, str(e)) from e
+    return jobmod.public_job(job, None)
 
 
 @app.post("/api/jobs/{job_id}/stop")
@@ -363,6 +389,10 @@ def get_media(job_id: str, index: int) -> FileResponse:
         lock = _preview_locks.setdefault(key, threading.Lock())
     with lock:
         if not dest.is_file():
+            try:
+                jobmod.require_source(job)
+            except jobmod.SourceMissing as e:
+                raise _err(404, str(e)) from e
             try:
                 ffmpeg_util.preview_mp4(
                     job["source_path"],

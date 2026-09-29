@@ -91,6 +91,21 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   align-items: center;
 }
 .file-meta { color: var(--muted); }
+.source-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; font-size: 12px; }
+.source-path { color: var(--muted); word-break: break-all; }
+.source-path.missing { color: var(--bad); font-weight: 600; }
+#btnRelink { padding: 3px 10px; font-size: 12px; }
+#btnRelink.warn { background: #5a2626; border-color: var(--bad); color: #fff; font-weight: 600; }
+.error-banner {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  background: #3a1d1d;
+  color: #ffd6d6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 .params {
@@ -210,7 +225,7 @@ video {
   border: 1px dashed var(--line);
   border-radius: 8px;
 }
-.progress-text.err { color: var(--bad); }
+.progress-text.err { color: var(--bad); font-weight: 600; }
 .seg-info { margin-bottom: 10px; }
 .seg-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .keys { color: var(--muted); font-size: 12px; }
