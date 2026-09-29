@@ -6,7 +6,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 
 ## What this is
 
-- FastAPI on `127.0.0.1:8765` + vanilla `static/index.html` / `app.js` / `app.css`.
+- FastAPI on `127.0.0.1:8779` (override `--port` / `VIDFIX_PORT`; busy non-vidFix ports are skipped up to +20) + vanilla `static/index.html` / `app.js` / `app.css`.
 - Jobs live on disk under `work/<job_id>/`. Progress is the files, not RAM.
 - Default: every segment is **skip**. Only manually tagged restore clips run processing.
 - Analysis does **not** detect faces. CodeFormer runs only on tagged clips that include the `codeformer` method.
@@ -20,7 +20,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 - Do not upscale the **output** (no 2×/4× export). Keep source resolution. Exception (user-approved): Real-ESRGAN may temporarily upscale a restore-tagged frame then downscale back to the original size — the finished clip stays at source resolution.
 - Do not run a second restore job at the same time (VRAM).
 - Do not restart a vidFix / uvicorn process the user killed. Tell them to run `run.bat`.
-- Do not bind a second server if `8765` is already in use. `app.py:main()` already opens the existing URL and returns.
+- Do not start a second vidFix. `app.py:main()` walks 8779…8799 (or the `--port`/`VIDFIX_PORT` start): a port answering `GET /api/ping` with `{"app":"vidfix"}` means vidFix is already running → open that URL and return; ports held by other programs are skipped; the first free one is bound.
 - Parameter changes must **not** auto-delete old `out/*.mkv`. Re-run is explicit via「清除修復結果並重跑已選段」.
 - UI language stays Traditional Chinese.
 
@@ -31,7 +31,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 - Torch is installed separately (CUDA wheel, not in `requirements.txt`).
 - ffmpeg / ffprobe must be on `PATH`.
 - Weights: `weights/CodeFormer/codeformer.pth`, `weights/insightface/models/buffalo_l/*.onnx`, `weights/RealESRGAN/realesr-general-x4v3.pth` (+ optional `realesr-general-wdn-x4v3.pth` for denoise DNI).
-- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=21`, css `v=18`). Ask the user to Ctrl+F5.
+- After changing `static/app.js` or `app.css`, bump the `?v=` query in `static/index.html` (currently js `v=22`, css `v=19`). Ask the user to Ctrl+F5.
 
 ## Where to edit
 
@@ -46,7 +46,7 @@ You are continuing a local Windows Python app for **selective face restoration o
 | Real-ESRGAN frame enhance | `vidfix/models/realesrgan.py` |
 | Offline affine smoothing | `vidfix/stabilize.py` |
 | Background threads, GPU lock, tags | `vidfix/worker.py` |
-| Concat + original audio | `vidfix/assemble.py` |
+| Concat + original audio, cut-only export modes | `vidfix/assemble.py` |
 | UI | `static/index.html`, `static/app.js`, `static/app.css` |
 
 ## Restore methods

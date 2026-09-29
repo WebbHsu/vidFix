@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import socket
 import sys
+import urllib.request
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
@@ -47,6 +51,10 @@ class TagBulkBody(BaseModel):
     methods: list[str] | None = None
 
 
+class AssembleBody(BaseModel):
+    mode: str = "restored"
+
+
 class SourceBody(BaseModel):
     path: str
 
@@ -76,6 +84,17 @@ class ParamsBody(BaseModel):
 
 def _err(status: int, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail=message)
+
+
+APP_ID = "vidfix"
+DEFAULT_PORT = 8779
+PORT_TRIES = 20
+
+
+@app.get("/api/ping")
+def ping() -> dict[str, str]:
+    """Cheap identity check used by main() to tell a running vidFix from another server."""
+    return {"app": APP_ID}
 
 
 @app.get("/api/health")
@@ -117,6 +136,7 @@ def health() -> dict[str, Any]:
     except Exception:
         pass
     return {
+        "app": APP_ID,
         "ffmpeg": ffmpeg_ok,
         "ffprobe": ffprobe_ok,
         "ffmpeg_message": ffmpeg_msg,
@@ -310,16 +330,20 @@ def start_restore(job_id: str) -> dict[str, str]:
 
 
 @app.post("/api/jobs/{job_id}/assemble")
-def start_assemble(job_id: str) -> dict[str, str]:
+def start_assemble(job_id: str, body: AssembleBody | None = None) -> dict[str, str]:
+    """mode: restored (default, needs finished restores) | cut | cut_original (no restoration)."""
+    mode = body.mode if body else "restored"
+    if mode not in ("restored", "cut", "cut_original"):
+        raise _err(400, "mode 只能是 restored、cut 或 cut_original")
     try:
-        worker.start_assemble(job_id)
+        worker.start_assemble(job_id, mode)
     except jobmod.SourceMissing as e:
         raise _err(400, str(e)) from e
     except RuntimeError as e:
         raise _err(409, str(e)) from e
     except (FileNotFoundError, ValueError) as e:
         raise _err(404, str(e)) from e
-    return {"ok": "assemble"}
+    return {"ok": "assemble", "mode": mode}
 
 
 @app.post("/api/jobs/{job_id}/source")
@@ -419,7 +443,8 @@ def get_final(job_id: str) -> FileResponse:
     path = job.get("final_path")
     if not path or not Path(path).is_file():
         raise _err(404, "尚未輸出成品")
-    name = Path(job.get("source_name") or "output.mkv").stem + "_vidfix.mkv"
+    suffix = "_vidfix.mkv" if job.get("final_mode", "restored") == "restored" else "_vidfix_cut.mkv"
+    name = Path(job.get("source_name") or "output.mkv").stem + suffix
     return FileResponse(path, media_type="video/x-matroska", filename=name)
 
 
@@ -450,18 +475,76 @@ def _port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
-def main() -> None:
+def _port_bindable(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        if os.name != "nt":
+            # Same as uvicorn on POSIX: TIME_WAIT from a just-closed server must not count as busy.
+            # (On Windows SO_REUSEADDR would allow binding over a live socket, so leave it off.)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+        return True
+
+
+def _is_vidfix(host: str, port: int, timeout: float = 2.0) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/ping", timeout=timeout) as r:
+            data = json.loads(r.read(4096) or b"null")
+    except Exception:
+        return False
+    return isinstance(data, dict) and data.get("app") == APP_ID
+
+
+def _preferred_port(argv: list[str] | None = None) -> int:
+    """--port beats VIDFIX_PORT beats DEFAULT_PORT."""
+    ap = argparse.ArgumentParser(description="vidFix 本機伺服器")
+    ap.add_argument("--port", type=int, default=None, help=f"預設 {DEFAULT_PORT}，或用環境變數 VIDFIX_PORT")
+    args = ap.parse_args(argv)
+    if args.port is not None:
+        port = args.port
+    else:
+        env = os.environ.get("VIDFIX_PORT", "").strip()
+        try:
+            port = int(env) if env else DEFAULT_PORT
+        except ValueError:
+            print(f"VIDFIX_PORT={env!r} 不是數字，改用 {DEFAULT_PORT}", flush=True)
+            port = DEFAULT_PORT
+    if not 1 <= port <= 65535 - PORT_TRIES:
+        ap.error(f"port 必須在 1–{65535 - PORT_TRIES}")
+    return port
+
+
+def pick_port(host: str, first: int, tries: int = PORT_TRIES) -> tuple[int, bool]:
+    """(port, already_running). Walk first..first+tries: an existing vidFix wins,
+    otherwise the first free port. Ports held by other programs are skipped."""
+    for port in range(first, first + tries + 1):
+        if _port_in_use(host, port):
+            if _is_vidfix(host, port):
+                return port, True
+            print(f"port {port} 已被其他程式使用，改試下一個", flush=True)
+            continue
+        if _port_bindable(host, port):
+            return port, False
+        print(f"port {port} 無法使用，改試下一個", flush=True)
+    raise SystemExit(f"{first}–{first + tries} 都無法使用，請用 --port 或 VIDFIX_PORT 指定其他 port")
+
+
+def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     ensure_dirs()
     host = "127.0.0.1"
-    port = 8765
+    first = _preferred_port(argv)
+    port, running = pick_port(host, first)
     url = f"http://{host}:{port}"
-    if _port_in_use(host, port):
-        print(f"vidFix 已經在跑：{url}")
-        print("沒有再開第二個。正在打開瀏覽器。")
+    if running:
+        print(f"vidFix 已經在跑：{url}", flush=True)
+        print("沒有再開第二個。正在打開瀏覽器。", flush=True)
         webbrowser.open(url)
         return
+    print(f"vidFix 網址：{url}", flush=True)
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=host, port=port, log_level="info")
 

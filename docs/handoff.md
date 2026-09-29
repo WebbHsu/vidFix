@@ -22,6 +22,7 @@ Working today:
 - Keep/drop editing (user request, extends spec D): per-segment `keep` (missing = keep), D / card button / timeline right-click / bulk buttons. Dropped segments are not restored and not assembled; their `out/` files stay.
 - Multi-select tagging (user request, 2026-09-29): Ctrl/Cmd/Shift click in grid and timeline, Shift+arrows, Ctrl+A, Esc. F/S/D apply to every selected segment with one bulk request (`POST /api/jobs/{id}/tags`, existing `POST /keep` with `indices`). `worker.set_tag` is a thin wrapper over `set_tags`; keep the per-segment output-deletion rules in one place. All-kept assemble runs the old stream-copy code unchanged (same packets as before); with drops, audio is cut per kept run to PCM with sample-exact boundaries and re-encoded to AAC (see architecture “Assemble”).
 
+- Port + cut-only export (2026-09-29): default port **8779** (user's 8765 was taken), `--port` / `VIDFIX_PORT`, startup probes `GET /api/ping` so a foreign server on the port is skipped instead of being mistaken for vidFix. 「直接輸出（不修復）」 exports kept segments without restoring (`assemble` mode `cut` / `cut_original`, see architecture “Assemble”). Source clips for restore-tagged segments go to `orig/`, never `out/` — `recover_jobs_on_startup` marks a restore segment done whenever `out/NNNN.mkv` exists, so a source clip there would be taken for a finished restore.
 - Error surfacing + source relink (2026-09-29): the worker thread used to `except Exception: pass`, so a missing NAS source made 開始修復 look dead (restore stayed `pending`). Now escaped errors are logged and written to `job.json` (`error`, `*_status=failed`, `phase`, `progress.message`); UI shows a red banner and alerts once. Start endpoints pre-check the source (400 「找不到原始影片：…」). `POST /api/jobs/{id}/source` +「重新指定原始影片」relinks a moved copy of the same video (duration ±0.5 s, same size/fps/audio presence) without re-analysis. Job API exposes `source_missing`.
 
 There is at least one live job under `work/` with ~350 segments, thumbs, skip outputs, and a `final.mkv`. Treat `work/` as user data. Do not delete it.
@@ -32,7 +33,7 @@ There is at least one live job under `work/` with ~350 segments, thumbs, skip ou
 - Project `.venv` is Python **3.12.6** with CUDA PyTorch. `run.bat` must be used.
 - System Python **3.14** is on PATH. If uvicorn is started with it: `No module named 'torch'` and CUDA pill stays off.
 - ffmpeg/ffprobe on PATH. scenedetect 0.7.x and opencv are installed in the venv.
-- Port **8765**. If something is already listening, `main()` opens the existing tab and does **not** start a second app. Stale 3.14 uvicorn on that port is a common “CUDA unchecked” cause — kill that process, then `run.bat`. Do **not** auto-restart a server the user just killed.
+- Port **8779** (`--port` / `VIDFIX_PORT`). `main()` checks start…start+20: a listener answering `/api/ping` with `app: vidfix` → open that tab, no second app; other listeners are skipped; first free port is bound and printed. Stale 3.14 uvicorn on that port is a common “CUDA unchecked” cause — kill that process, then `run.bat`. Do **not** auto-restart a server the user just killed.
 
 ## Quality history (do not regress)
 
@@ -109,12 +110,14 @@ keeps 1280×720 / 250 frames / sequential frame bar / joins intact with skip seg
 - No automated tests except `python -m vidfix.plan`. There is no pytest suite.
 - Preview MP4 uses simple `-ss` before `-i` (not hybrid). Fine for watching; do not use previews as assemble sources.
 - Changing strengths/methods never auto-rebuilds outputs (spec). Users forget this constantly — remind them.
-- Static cache: bump `app.js?v=` / `app.css?v=` in `index.html` on every frontend change (js is `v=21`, css `v=18` as of this file).
+- Static cache: bump `app.js?v=` / `app.css?v=` in `index.html` on every frontend change (js is `v=22`, css `v=19` as of this file).
 - Keep/drop: only the dropped-segments assemble path re-encodes audio. Do not “simplify” it to `-c:a copy` + cut (AAC frame granularity drifts at each join) or to a single `asplit`/`atrim`/`concat` graph (RAM on long films). The temp name must stay `NNNN.partial.wav` (real extension, same lesson as thumbs).
 - Seen while testing keep/drop (not changed): the all-kept copy path puts the source AAC’s first packet at the video start and loses the ~21 ms encoder-delay offset, so audio is ~21 ms late (under one frame). And the hybrid seek can start a skip clip one frame late when `t0 - 2.5` falls between frames (it showed up on a video-only 25 fps test file with segment starts at whole seconds), probably because `setpts=PTS-STARTPTS` resets to the first frame after the coarse seek, not to the coarse time. Both affect the old path too; not touched here. The last segment’s `t1` is the container duration, which can be one frame past the last video frame.
 - `torch` version on this machine has been CUDA 12.x (cu124 / cu128). Do not `pip install torch` from PyPI CPU wheels into `.venv`.
 
 - Seen while testing relink (not changed): `refreshJob` rewrites the method checkboxes from `job.params` on every 1 s poll, so a checkbox toggled less than ~300 ms (debounce) before a poll can snap back and the stale set gets saved. Also `source_missing` is an `is_file()` on every poll; an offline SMB share on Windows can make that call slow.
+- `orig/` clips are not invalidated automatically (segment boundaries never change after analyze, so they stay valid). Retagging to skip leaves them as dead files; they are small and safe to delete by hand.
+- `kept_duration` / the concat list count the last segment to the container duration, which can be one frame past the last real frame (see keep/drop note above). Measured output video is correct; audio of the last run can be ~1 frame + AAC priming longer than the video.
 - Relink compares duration/size/fps/audio presence only, not content. A different film with identical specs would be accepted; previews in `previews/` are kept and would then be stale.
 
 ## Typical next tasks (if asked)

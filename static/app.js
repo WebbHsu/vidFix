@@ -244,6 +244,9 @@ async function refreshJob() {
   $("btnStop").disabled = !running;
   $("btnClear").disabled = running;
   $("btnDownload").classList.toggle("hidden", !job.final_exists);
+  $("btnDownload").textContent =
+    job.final_mode && job.final_mode !== "restored" ? "下載成品（直接輸出版）" : "下載成品";
+  $("btnCutOnly").disabled = running || job.analyze_status !== "done";
   $("btnDownload").href = `/api/jobs/${state.jobId}/final`;
 
   try {
@@ -770,9 +773,9 @@ $("btnOpen").onclick = async () => {
   await loadJob(id);
 };
 
-async function postAction(path, startsTask = false) {
+async function postAction(path, startsTask = false, body = {}) {
   try {
-    await api(path, { method: "POST", body: "{}" });
+    await api(path, { method: "POST", body: JSON.stringify(body) });
     // A task that fails again with the same message should still alert.
     if (startsTask) state.lastErr = null;
     await refreshJob();
@@ -801,12 +804,32 @@ $("btnAssemble").onclick = () => {
   }
   const pending = state.segs.filter((s) => s.tag === "restore" && s.status !== "done" && isKept(s));
   if (pending.length) {
-    alert(`還有 ${pending.length} 段修復未完成，請先開始修復或改回跳過。`);
+    alert(`還有 ${pending.length} 段修復未完成，請先開始修復或改回跳過。\n不想修復的話可以按「直接輸出（不修復）」。`);
     return;
   }
   postAction(`/api/jobs/${state.jobId}/assemble`, true);
 };
 $("btnRelink").onclick = () => relinkSource();
+$("btnCutOnly").onclick = () => {
+  const kept = state.segs.filter((s) => isKept(s));
+  if (!kept.length) {
+    alert("沒有保留任何段，無法輸出。請至少保留一段（D 切換保留／捨去）。");
+    return;
+  }
+  const original = $("cutOriginal").checked;
+  const restored = kept.filter((s) => s.tag === "restore" && s.status === "done" && s.has_out).length;
+  const useRestored = original ? 0 : restored;
+  const lines = [
+    `直接輸出（不修復）：保留 ${kept.length}/${state.segs.length} 段，依序接成一支片。`,
+    useRestored
+      ? `已修好的 ${useRestored} 段用修復版，其餘 ${kept.length - useRestored} 段用原畫面。`
+      : "全部使用原畫面。",
+    "不會跑修復，不會刪修復檔，也不會改標籤。",
+    "會覆蓋這個任務目前的成品（final.mkv）。",
+  ];
+  if (!confirm(lines.join("\n"))) return;
+  postAction(`/api/jobs/${state.jobId}/assemble`, true, { mode: original ? "cut_original" : "cut" });
+};
 $("btnStop").onclick = () => postAction(`/api/jobs/${state.jobId}/stop`);
 $("btnClear").onclick = async () => {
   if (!confirm("清除已選修復段的輸出並重跑？未選的段不會動。")) return;

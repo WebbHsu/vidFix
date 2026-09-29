@@ -17,8 +17,22 @@ class Stopped(Exception):
 
 NO_KEPT_MSG = "沒有保留任何段，無法輸出。請至少保留一段（D 切換保留／捨去）。"
 
+# restored: every kept restore segment must be done (輸出成品).
+# cut: ignore restoration; done restore clips are used, the rest comes from the source.
+# cut_original: ignore restoration entirely; every kept segment comes from the source.
+MODES = ("restored", "cut", "cut_original")
+MODE_LABELS = {"restored": "成品", "cut": "直接輸出（已修好的段用修復版）", "cut_original": "直接輸出（全部原畫面）"}
 
-def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
+
+def orig_clip_path(job_id: str, index: int):
+    """Source-only clip for a restore-tagged segment, kept apart from out/ so the
+    restore state (status/out_kind, startup resync from out/) is never touched."""
+    return job_dir(job_id) / "orig" / f"{int(index):04d}.mkv"
+
+
+def run_assemble(job_id: str, stop_check: StopCheck | None = None, mode: str = "restored") -> None:
+    if mode not in MODES:
+        raise ValueError(f"未知的輸出模式：{mode}")
     stop_check = stop_check or (lambda: jobmod.should_stop(job_id))
     job = jobmod.load_job(job_id)
     src = Path(job["source_path"])
@@ -34,7 +48,7 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
     all_kept = len(segs) == len(all_segs)
 
     missing_restore = [s for s in segs if jobmod.needs_restore(s)]
-    if missing_restore:
+    if missing_restore and mode == "restored":
         ids = ", ".join(f"{int(s['index']):04d}" for s in missing_restore[:12])
         raise RuntimeError(f"還有未完成的修復段：{ids}")
 
@@ -43,16 +57,18 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
         phase="assemble",
         assemble_status="running",
         error=None,
+        final_mode=mode,
         progress=jobmod.empty_progress()
         | {
-            "message": "準備輸出",
+            "message": "準備輸出" if mode == "restored" else "準備直接輸出（不修復）",
             "started_at": time.time(),
             "total": len(segs),
         },
     )
+    head = "輸出開始" if mode == "restored" else f"{MODE_LABELS[mode]}開始"
     jobmod.append_log(
         job_id,
-        "輸出開始" if all_kept else f"輸出開始（保留 {len(segs)}/{len(all_segs)} 段）",
+        head if all_kept else f"{head}（保留 {len(segs)}/{len(all_segs)} 段）",
     )
     started = time.time()
 
@@ -65,6 +81,11 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
             idx = int(seg["index"])
             dest = jobmod.segment_out_path(job_id, idx)
             kind = "restore" if seg.get("tag") == "restore" else "skip"
+            if kind == "restore" and mode != "restored":
+                restored_ok = seg.get("status") == "done" and dest.is_file()
+                if mode == "cut_original" or not restored_ok:
+                    kind = "orig"
+                    dest = orig_clip_path(job_id, idx)
             nframes = ffmpeg_util.clip_frame_count(float(seg["t0"]), float(seg["t1"]), fps)
             dur = nframes / fps
             jobmod.set_progress(
@@ -79,6 +100,20 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
                 if not dest.is_file():
                     raise RuntimeError(f"修復檔不存在：{dest.name}")
                 # codeformer or deblock output is used as-is
+            elif kind == "orig":
+                # Same encode as skip clips so concat sees one H.264 profile.
+                if not dest.is_file():
+                    ffmpeg_util.encode_skip_clip(
+                        src,
+                        float(seg["t0"]),
+                        float(seg["t1"]),
+                        dest,
+                        width=int(job["width"]),
+                        height=int(job["height"]),
+                        fps=fps,
+                        crf=int(job["params"].get("crf_skip") or 18),
+                        preset=str(job["params"].get("preset_skip") or "veryfast"),
+                    )
             else:
                 need = True
                 if dest.is_file() and seg.get("out_kind") == "skip_v2":
@@ -121,10 +156,11 @@ def run_assemble(job_id: str, stop_check: StopCheck | None = None) -> None:
             phase="done",
             assemble_status="done",
             final_path=str(final_path),
-            progress=jobmod.empty_progress() | {"message": "成品已輸出"},
+            progress=jobmod.empty_progress()
+            | {"message": "成品已輸出" if mode == "restored" else f"已{MODE_LABELS[mode]}"},
             error=None,
         )
-        jobmod.append_log(job_id, f"成品：{final_path}")
+        jobmod.append_log(job_id, f"{MODE_LABELS[mode]}：{final_path}")
     except Stopped:
         jobmod.update_job(
             job_id,

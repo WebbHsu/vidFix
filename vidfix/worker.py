@@ -132,14 +132,24 @@ def start_restore(job_id: str) -> None:
     _spawn(job_id, go, "restore")
 
 
-def start_assemble(job_id: str) -> None:
+def start_assemble(job_id: str, mode: str = "restored") -> None:
+    """mode: restored (輸出成品) | cut | cut_original (直接輸出，不修復). See assemble.MODES."""
+    if mode not in assemble.MODES:
+        raise ValueError(f"未知的輸出模式：{mode}")
     job = jobmod.load_job(job_id)
     if job.get("analyze_status") != "done":
         raise RuntimeError("請先完成分析")
-    if not any(jobmod.is_kept(s) for s in jobmod.load_segments(job_id)):
+    segs = jobmod.load_segments(job_id)
+    if not any(jobmod.is_kept(s) for s in segs):
         raise RuntimeError(assemble.NO_KEPT_MSG)
+    if mode == "restored":
+        pending = [s for s in segs if jobmod.needs_restore(s)]
+        if pending:
+            raise RuntimeError(
+                f"還有 {len(pending)} 段修復未完成，請先開始修復、改回跳過，或用「直接輸出（不修復）」"
+            )
     _check_source(job_id, job)
-    _spawn(job_id, lambda: assemble.run_assemble(job_id), "assemble")
+    _spawn(job_id, lambda: assemble.run_assemble(job_id, mode=mode), "assemble")
 
 
 def _check_source(job_id: str, job: dict) -> None:

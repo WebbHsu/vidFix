@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>vidFix</title>
-  <link rel="stylesheet" href="/static/app.css?v=18" />
+  <link rel="stylesheet" href="/static/app.css?v=19" />
 </head>
 <body>
   <header class="top">
@@ -43,6 +43,10 @@
         <button type="button" id="btnAnalyze" class="primary">分析</button>
         <button type="button" id="btnRestore">開始修復</button>
         <button type="button" id="btnAssemble">輸出成品</button>
+        <span class="cut-box" title="不跑任何修復，只把保留的段依序接成一支片（捨去的段不進成品）。不會刪修復檔、不會改標籤。">
+          <button type="button" id="btnCutOnly">直接輸出（不修復）</button>
+          <label class="chk"><input type="checkbox" id="cutOriginal" /> 已修好的段也用原畫面</label>
+        </span>
         <button type="button" id="btnStop" class="danger">停止</button>
         <button type="button" id="btnClear">清除修復結果並重跑已選段</button>
         <a id="btnDownload" class="btn hidden" href="#">下載成品</a>
@@ -137,6 +141,6 @@
     <pre id="log" class="log"></pre>
   </section>
 
-  <script src="/static/app.js?v=21"></script>
+  <script src="/static/app.js?v=22"></script>
 </body>
 </html>

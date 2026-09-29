@@ -7,8 +7,11 @@ Entry for **how the code is structured**. Product rules: `../spec.md`. Agent con
 ```
 run.bat
   → .venv\Scripts\python.exe app.py
-      → if 127.0.0.1:8765 already bound: open browser, exit
-      → else uvicorn FastAPI, open http://127.0.0.1:8765
+      → start port: --port, else VIDFIX_PORT, else 8779
+      → for port in start..start+20:
+          listening + GET /api/ping == {"app":"vidfix"} → open browser to it, exit
+          listening, not vidFix → skip
+          bindable → uvicorn FastAPI there, print + open http://127.0.0.1:<port>
 ```
 
 One process. Background work is daemon threads in `vidfix/worker.py`. Only one job thread at a time. A process-wide `_busy_gpu` lock is taken when the restore queue includes CodeFormer or Real-ESRGAN.
@@ -61,6 +64,7 @@ Frontend is vanilla JS. No build step. Cache-bust with `?v=` on `/static/app.js`
 | `cuts.json` | scene cut times (or `fallback: fixed-length`) |
 | `thumbs/0000.jpg` | one JPEG per segment (midpoint) |
 | `out/0000.mkv` | finished clip; in-flight is `0000.mkv.partial` |
+| `orig/0000.mkv` | source-only clip for a **restore-tagged** segment, made only by cut-only export (same encode as skip clips). Kept out of `out/` so restore state and the startup resync never see it |
 | `previews/0000.mp4` | on-demand original-slice preview |
 | `concat.txt` | ffmpeg concat list for assemble |
 | `final.mkv` | muxed output |
@@ -130,12 +134,13 @@ Allowed restore method ids: `codeformer`, `deblock`, `deblur`, `denoise`, `reale
 | PATCH | `/api/jobs/{id}/segments/{i}/keep` | `{keep: bool}` |
 | POST | `/api/jobs/{id}/keep` | `{action: keep\|drop\|invert, indices?}`; no indices = all segments |
 | POST | `/api/jobs/{id}/params` | fidelity, visibility, methods, strengths |
-| POST | `/api/jobs/{id}/analyze` \| `restore` \| `assemble` \| `stop` | missing source = 400 before any thread starts |
+| POST | `/api/jobs/{id}/analyze` \| `restore` \| `assemble` \| `stop` | missing source = 400 before any thread starts. `assemble` takes optional `{mode}`: `restored` (default; 409 if a kept restore segment is unfinished), `cut`, `cut_original` |
 | POST | `/api/jobs/{id}/source` | `{path}`; relink a moved source (`worker.relink_source`): file exists, `.mkv`, ffprobe duration within 0.5 s, same width/height/fps, same has-audio; 409 while this job runs. Updates `source_path`/`source_name`, clears `error`, `failed` statuses → `pending`, logs. Segments/thumbs/`out/` untouched |
 | POST | `/api/jobs/{id}/clear-restore` | delete selected restore outputs |
 | GET | `/api/jobs/{id}/thumbs/{name}.jpg` | |
 | GET | `/api/jobs/{id}/segments/{i}/media` | lazy preview mp4 |
-| GET | `/api/jobs/{id}/final` | download `final.mkv` |
+| GET | `/api/jobs/{id}/final` | download `final.mkv` (`<stem>_vidfix.mkv`, or `_vidfix_cut.mkv` when `final_mode` is a cut mode) |
+| GET | `/api/ping` | `{"app":"vidfix"}`; used by `main()` to recognise a running vidFix (`/api/health` also carries `app`) |
 | GET | `/api/jobs/{id}/log` | last 100 log lines |
 
 `GET /api/jobs/{id}` also returns `kept_count`, `kept_duration` (frame-grid seconds) and `source_exists` / `source_missing` (the UI warns and highlights 「重新指定原始影片」). Serialized segments always carry an explicit `keep`.
@@ -222,6 +227,16 @@ Face paste (`restorer._paste_face`): warp 512 restored face with inverse affine,
 Tiny face (`_face_w < tiny_face_px`): fidelity raised toward 0.50–0.55, visibility capped at 0.55.
 
 ### Assemble
+
+`run_assemble(job_id, mode)`; `job.final_mode` records the mode of the current `final.mkv`.
+
+| mode | UI | restore-tagged kept segment |
+|---|---|---|
+| `restored` | 輸出成品 | must be done (`out/NNNN.mkv`), else error |
+| `cut` | 直接輸出（不修復） | done → `out/NNNN.mkv`; otherwise `orig/NNNN.mkv` |
+| `cut_original` | 直接輸出 + 「已修好的段也用原畫面」 | always `orig/NNNN.mkv` |
+
+`orig/` clips are `encode_skip_clip` with the skip CRF/preset, made on demand and reused. Skip-tagged segments use the normal `out/` `skip_v2` path in every mode. Tags, `status`, `out_kind` and `out/` files are never changed by cut modes. Everything below (concat, audio copy vs per-run PCM cut) is shared by all modes.
 
 For every **kept** segment (`job.is_kept`; none kept → Chinese error, also rejected up front by `worker.start_assemble`):
 

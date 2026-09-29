@@ -106,7 +106,9 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   white-space: pre-wrap;
   word-break: break-all;
 }
-.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.cut-box { display: inline-flex; gap: 6px; align-items: center; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 6px; }
+.cut-box .chk { font-size: 12px; }
 
 .params {
   margin-top: 12px;
